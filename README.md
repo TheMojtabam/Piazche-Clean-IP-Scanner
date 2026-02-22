@@ -582,3 +582,4 @@ Strategy 3 - Widen (expand search area):
 - Results are saved to `results/` directory as CSV or JSON
 - Higher thread count = faster scan but more resource usage
 # P
+# P
