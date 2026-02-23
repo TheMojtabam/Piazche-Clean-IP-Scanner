@@ -433,6 +433,7 @@ label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px;text-align
 // ══ State ══
 let ws = null;
 let p2Results = [];
+let p2LiveResults = [];
 let shodanIPs = [];
 let tuiAutoScroll = true;
 let savedProxyAddr = '';
@@ -467,7 +468,21 @@ function handleWS(msg) {
       document.getElementById('phaseLabel').textContent = 'Phase 2 — ' + payload.count + ' IP';
       document.getElementById('progressBar').classList.add('ph2');
       updateStatus('scanning','phase2');
+      p2LiveResults = [];
       break;
+    case 'phase2_progress': {
+      const r = payload;
+      // update live ticker
+      const dlTxt = r.dl!=='—' ? '  ↓'+r.dl : '';
+      const ulTxt = r.ul!=='—' ? '  ↑'+r.ul : '';
+      updateLiveTicker(r.ip+'  '+Math.round(r.latency)+'ms  loss:'+r.loss.toFixed(0)+'%'+dlTxt+ulTxt, 'phase2');
+      // update progress bar
+      const pct2 = r.total>0 ? Math.round(r.done/r.total*100) : 0;
+      document.getElementById('progressBar').style.width = pct2+'%';
+      document.getElementById('pctLabel').textContent = pct2+'%';
+      document.getElementById('progDetail').textContent = 'Phase 2: '+r.done+'/'+r.total+' · score:'+r.score.toFixed(0);
+      break;
+    }
     case 'phase2_done':
       p2Results = payload.results || [];
       refreshResults();
@@ -663,7 +678,25 @@ function renderResults(results) {
     const scc=sc>=75?'var(--g)':sc>=50?'var(--y)':'var(--r)';
     const lc=r.AvgLatencyMs<=500?'var(--g)':r.AvgLatencyMs<=1500?'var(--y)':'var(--r)';
     const badge=r.Passed?'<span class="badge bg">PASS</span>':'<span class="badge br" title="'+(r.FailReason||'')+'">FAIL</span>';
-    return '<tr><td style="color:var(--dim)">'+(i+1)+'.</td><td style="color:var(--c)">'+r.IP+'</td><td style="color:'+scc+'">'+sc.toFixed(1)+'</td><td style="color:'+lc+'">'+Math.round(r.AvgLatencyMs)+'ms</td><td style="color:var(--dim)">'+(r.JitterMs>0?r.JitterMs.toFixed(0)+'ms':'—')+'</td><td style="color:'+(r.PacketLossPct<=5?'var(--g)':'var(--r)')+'">'+(r.PacketLossPct||0).toFixed(0)+'%</td><td style="color:var(--c2)">'+(r.DownloadMbps>0?r.DownloadMbps.toFixed(1)+' M':'—')+'</td><td style="color:var(--c2)">'+(r.UploadMbps>0?r.UploadMbps.toFixed(1)+' M':'—')+'</td><td>'+badge+'</td><td><button class="copy-btn" onclick="copyIP(\''+r.IP+'\')">📋</button></td></tr>';
+    const dl=r.DownloadMbps||0;
+    const ul=r.UploadMbps||0;
+    const dlc=dl<=0?'var(--dim)':dl>=5?'var(--g)':dl>=1?'var(--y)':'var(--r)';
+    const ulc=ul<=0?'var(--dim)':ul>=2?'var(--g)':ul>=0.5?'var(--y)':'var(--r)';
+    const dlTxt=dl>0?dl.toFixed(1)+' M':'—';
+    const ulTxt=ul>0?ul.toFixed(1)+' M':'—';
+    return '<tr><td style="color:var(--dim)">'+(i+1)+'.</td>'+
+      '<td style="color:var(--c)">'+r.IP+'</td>'+
+      '<td style="color:'+scc+'">'+sc.toFixed(1)+'</td>'+
+      '<td style="color:'+lc+'">'+Math.round(r.AvgLatencyMs)+'ms</td>'+
+      '<td style="color:var(--dim)">'+(r.JitterMs>0?r.JitterMs.toFixed(0)+'ms':'—')+'</td>'+
+      '<td style="color:'+(r.PacketLossPct<=5?'var(--g)':'var(--r)')+'">'+(r.PacketLossPct||0).toFixed(0)+'%</td>'+
+      '<td style="color:'+dlc+'">'+dlTxt+'</td>'+
+      '<td style="color:'+ulc+'">'+ulTxt+'</td>'+
+      '<td>'+badge+'</td>'+
+      '<td style="display:flex;gap:4px">'+
+        '<button class="copy-btn" onclick="copyIP(\''+r.IP+'\')" title="کپی IP">📋</button>'+
+        '<button class="copy-btn" onclick="copyWithIP(\''+r.IP+'\')" title="کپی لینک با این IP">🔗</button>'+
+      '</td></tr>';
   }).join('');
 }
 
@@ -803,28 +836,103 @@ function showShodanAlert(msg,type){ const el=document.getElementById('shodanAler
 function exportResults(f){ window.location.href='/api/results/export?format='+f; }
 function copyIP(ip){ navigator.clipboard.writeText(ip).then(()=>appendTUI({t:now(),l:'ok',m:'📋 '+ip})).catch(()=>{ const el=document.createElement('textarea');el.value=ip;document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el); appendTUI({t:now(),l:'ok',m:'📋 '+ip}); }); }
 
+// کپی لینک vless/vmess با IP جدید
+function copyWithIP(newIP) {
+  const linkEl = document.getElementById('linkInput');
+  const rawLink = linkEl ? linkEl.value.trim() : '';
+  if(!rawLink){ copyIP(newIP); return; }
+  try {
+    let updated = rawLink;
+    // برای vless://uuid@IP:port و vmess و trojan
+    updated = rawLink.replace(/(@)([^:@\/?#\[\]]+)(:\d+)/, '$1'+newIP+'$3');
+    navigator.clipboard.writeText(updated).then(()=>{
+      appendTUI({t:now(),l:'ok',m:'🔗 لینک با '+newIP+' کپی شد'});
+    });
+  } catch(e){ copyIP(newIP); }
+}
+
+// ══ Settings Persist ══
+function loadSavedSettings() {
+  fetch('/api/config/load').then(r=>r.json()).then(d=>{
+    // Load proxy badge
+    if(d.hasProxy){
+      try {
+        const pc = JSON.parse(d.proxyConfig);
+        const addr = pc.proxy?.address||'';
+        const method = pc.proxy?.method||'tls';
+        const type = pc.proxy?.type||'ws';
+        if(addr) updateProxyBadge(addr, method, type);
+      } catch(e){}
+    }
+    // Load scan config settings into form fields
+    if(d.scanConfig){
+      try {
+        const sc = JSON.parse(d.scanConfig);
+        const s = sc.scan||{};
+        const f = sc.fragment||{};
+        const x = sc.xray||{};
+        const sh = sc.shodan||{};
+        // Phase 1
+        if(s.threads) setVal('cfgThreads', s.threads);
+        if(s.timeout) setVal('cfgTimeout', s.timeout);
+        if(s.maxLatency) setVal('cfgMaxLat', s.maxLatency);
+        if(s.retries!=null) setVal('cfgRetries', s.retries);
+        if(s.maxIPs!=null) setVal('cfgMaxIPs', s.maxIPs);
+        if(s.sampleSize) setVal('cfgSampleSize', s.sampleSize);
+        if(s.testUrl) setVal('cfgTestURL', s.testUrl);
+        if(s.shuffle!=null) setChk('cfgShuffle', s.shuffle);
+        // Phase 2
+        if(s.stabilityRounds!=null) setVal('cfgRounds', s.stabilityRounds);
+        if(s.stabilityInterval) setVal('cfgInterval', s.stabilityInterval);
+        if(s.packetLossCount) setVal('cfgPLCount', s.packetLossCount);
+        if(s.maxPacketLossPct!=null) setVal('cfgMaxPL', s.maxPacketLossPct);
+        if(s.minDownloadMbps!=null) setVal('cfgMinDL', s.minDownloadMbps);
+        if(s.minUploadMbps!=null) setVal('cfgMinUL', s.minUploadMbps);
+        if(s.speedTest!=null) setChk('cfgSpeed', s.speedTest);
+        if(s.jitterTest!=null) setChk('cfgJitter', s.jitterTest);
+        if(s.downloadUrl) setVal('cfgDLURL', s.downloadUrl);
+        if(s.uploadUrl) setVal('cfgULURL', s.uploadUrl);
+        // Fragment
+        if(f.mode) setSelVal('cfgFragMode', f.mode);
+        if(f.packets) setVal('cfgFragPkts', f.packets);
+        if(f.manual?.length) setVal('cfgFragLen', f.manual.length);
+        if(f.manual?.interval) setVal('cfgFragInt', f.manual.interval);
+        // Xray
+        if(x.logLevel) setSelVal('cfgXrayLog', x.logLevel);
+        if(x.mux?.concurrency!=null) setVal('cfgMuxConc', x.mux.concurrency);
+        if(x.mux?.enabled!=null) setChk('cfgMuxEnabled', x.mux.enabled);
+        // Shodan
+        if(sh.mode) setSelVal('cfgShodanMode', sh.mode);
+        if(sh.apiKey) setVal('cfgShodanKey', sh.apiKey);
+        if(sh.pages) setVal('cfgShodanPages', sh.pages);
+        if(sh.saveHarvestedIPs) setVal('cfgShodanSave', sh.saveHarvestedIPs);
+        if(sh.useDefaultQuery!=null) setChk('cfgShodanUseDefault', sh.useDefaultQuery);
+        if(sh.excludeCFRanges!=null) setChk('cfgShodanExcludeCF', sh.excludeCFRanges);
+        if(sh.appendToExisting!=null) setChk('cfgShodanAppend', sh.appendToExisting);
+        // sync quick settings
+        if(s.threads) setVal('qThreads', s.threads);
+        if(s.timeout) setVal('qTimeout', s.timeout);
+        if(s.maxLatency) setVal('qMaxLat', s.maxLatency);
+        if(s.stabilityRounds!=null) setVal('qRounds', s.stabilityRounds);
+        if(s.sampleSize) setVal('sampleSize', s.sampleSize);
+      } catch(e){ console.warn('load settings err', e); }
+    }
+    // Load saved TUI history
+    fetch('/api/tui/stream').then(r=>r.json()).then(data=>{
+      if(data.lines&&data.lines.length){
+        data.lines.forEach(line=>{ try{ appendTUI(JSON.parse(line)); }catch(e){} });
+      }
+    });
+  });
+}
+function setVal(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
+function setChk(id, v){ const el=document.getElementById(id); if(el) el.checked=!!v; }
+function setSelVal(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
+
 // ══ Init ══
 connectWS();
 fetch('/api/status').then(r=>r.json()).then(d=>{ updateStatus(d.status||'idle',d.phase||''); });
-
-// Load saved config from server
-fetch('/api/config/load').then(r=>r.json()).then(d=>{
-  if(d.hasProxy){
-    try {
-      const pc = JSON.parse(d.proxyConfig);
-      const addr = pc.proxy?.address||'';
-      const method = pc.proxy?.method||'tls';
-      const type = pc.proxy?.type||'ws';
-      if(addr) updateProxyBadge(addr, method, type);
-    } catch(e){}
-  }
-  // Load saved TUI history
-  fetch('/api/tui/stream').then(r=>r.json()).then(data=>{
-    if(data.lines&&data.lines.length){
-      data.lines.forEach(line=>{ try{ appendTUI(JSON.parse(line)); }catch(e){} });
-    }
-  });
-});
+loadSavedSettings();
 </script>
 </body>
 </html>
