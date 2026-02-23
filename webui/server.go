@@ -650,8 +650,7 @@ func parseIPInputWithSample(input string, sampleSize int) []string {
 	if sampleSize <= 0 {
 		sampleSize = 1
 	}
-	for _, line := range strings.Split(input, "
-") {
+	for _, line := range strings.Split(input, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -660,8 +659,7 @@ func parseIPInputWithSample(input string, sampleSize int) []string {
 			// CIDR — expand with sampleSize
 			expanded, err := utils.ExpandCIDR(line, sampleSize)
 			if err != nil {
-				fmt.Printf("warning: invalid CIDR %s: %v
-", line, err)
+				fmt.Printf("warning: invalid CIDR %s: %v\n", line, err)
 				continue
 			}
 			ips = append(ips, expanded...)
