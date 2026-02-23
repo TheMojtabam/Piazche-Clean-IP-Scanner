@@ -36,6 +36,11 @@ type Phase2Result struct {
 // RunPhase2 takes the successful IPs from phase-1 and runs deep tests
 // concurrency=4: سریع‌تر از sequential، بدون port exhaustion
 func RunPhase2(ctx context.Context, cfg *config.Config, phase1Results []Result) []Phase2Result {
+	return RunPhase2WithCallback(ctx, cfg, phase1Results, nil)
+}
+
+// RunPhase2WithCallback مثل RunPhase2 ولی هر بار که یه IP تموم شد callback میزنه
+func RunPhase2WithCallback(ctx context.Context, cfg *config.Config, phase1Results []Result, onDone func(Phase2Result)) []Phase2Result {
 	rounds := cfg.Scan.StabilityRounds
 	if rounds <= 0 {
 		rounds = 1
@@ -144,6 +149,10 @@ func RunPhase2(ctx context.Context, cfg *config.Config, phase1Results []Result) 
 				jitterStr, speedStr, statusStr)
 			final[idx] = p2
 			mu.Unlock()
+
+			if onDone != nil {
+				onDone(p2)
+			}
 		}(i, candidate.IP)
 	}
 
@@ -180,16 +189,36 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 	}
 
 	manager := xray.NewManagerWithDebug(false)
-	if err := manager.Start(xrayConfig, port); err != nil {
-		p2.FailReason = "xray start failed"
+
+	// Retry up to 3 times with a different port if start fails
+	var startErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			utils.ReleasePort(port)
+			time.Sleep(150 * time.Millisecond)
+			port = utils.AcquirePort()
+			xrayConfig, err = config.GenerateXrayConfig(cfg, ip, port)
+			if err != nil {
+				p2.FailReason = "config error"
+				return p2
+			}
+		}
+		startErr = manager.Start(xrayConfig, port)
+		if startErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if startErr != nil {
+		p2.FailReason = fmt.Sprintf("xray start failed: %v", startErr)
 		return p2
 	}
 	defer manager.Stop()
 
-	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := manager.WaitForReadyWithContext(readyCtx, 5*time.Second); err != nil {
+	readyCtx, readyCancel := context.WithTimeout(ctx, 8*time.Second)
+	if err := manager.WaitForReadyWithContext(readyCtx, 8*time.Second); err != nil {
 		readyCancel()
-		p2.FailReason = "xray not ready"
+		p2.FailReason = fmt.Sprintf("xray not ready: %v", err)
 		return p2
 	}
 	readyCancel()
