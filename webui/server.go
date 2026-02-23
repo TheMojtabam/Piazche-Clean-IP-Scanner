@@ -414,7 +414,42 @@ func (s *Server) runScan(cfg *config.Config, ipRanges string, maxIPs int) {
 
 	// Phase 2
 	if len(results) > 0 && cfg.Scan.StabilityRounds > 0 {
-		p2results := scanner.RunPhase2(ctx, cfg, results)
+		total2 := len(results)
+		var done2 int
+
+		onP2Progress := func(r scanner.Phase2Result) {
+			done2++
+			dlStr := "—"
+			if r.DownloadMbps > 0 {
+				dlStr = fmt.Sprintf("%.1fM", r.DownloadMbps)
+			}
+			ulStr := "—"
+			if r.UploadMbps > 0 {
+				ulStr = fmt.Sprintf("%.1fM", r.UploadMbps)
+			}
+			s.hub.Broadcast("phase2_progress", map[string]interface{}{
+				"ip":         r.IP,
+				"done":       done2,
+				"total":      total2,
+				"passed":     r.Passed,
+				"latency":    r.AvgLatencyMs,
+				"jitter":     r.JitterMs,
+				"loss":       r.PacketLossPct,
+				"dl":         dlStr,
+				"ul":         ulStr,
+				"score":      r.StabilityScore,
+				"failReason": r.FailReason,
+			})
+			icon := "✓"
+			if !r.Passed {
+				icon = "✗"
+			}
+			s.tuiLog(fmt.Sprintf("[%d/%d] %s %s  lat:%.0fms  loss:%.0f%%  ↓%s  ↑%s",
+				done2, total2, icon, r.IP, r.AvgLatencyMs, r.PacketLossPct, dlStr, ulStr),
+				map[bool]string{true: "ok", false: "err"}[r.Passed])
+		}
+
+		p2results := scanner.RunPhase2WithCallback(ctx, cfg, results, onP2Progress)
 
 		s.state.mu.Lock()
 		s.state.Phase2Results = p2results
