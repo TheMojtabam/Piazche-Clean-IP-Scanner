@@ -339,9 +339,9 @@ func (s *Server) runScan(cfg *config.Config, ipRanges string, maxIPs int) {
 	s.state.mu.Unlock()
 
 	s.hub.Broadcast("status", map[string]string{"status": "scanning", "phase": "phase1"})
-	s.tuiLog("▶ اسکن شروع شد — " + fmt.Sprintf("%d IP", scnr.IPCount()), "info")
 
 	scnr := scanner.NewScannerWithDebug(cfg, false)
+	s.tuiLog("▶ اسکن شروع شد — "+fmt.Sprintf("%d IP", scnr.IPCount()), "info")
 
 	// Live IP tracking callback — fires when IP is dispatched to worker
 	var lastResultCount int64
