@@ -576,24 +576,20 @@ async function startScan() {
   const ipInput = document.getElementById('ipInput').value.trim();
   const maxIPs = parseInt(document.getElementById('maxIPs').value)||0;
 
-  // Build scan config from quick settings (proxy config is server-side)
-  const scanCfg = JSON.stringify({
-    scan: {
-      threads: parseInt(document.getElementById('qThreads').value)||200,
-      timeout: parseInt(document.getElementById('qTimeout').value)||8,
-      maxLatency: parseInt(document.getElementById('qMaxLat').value)||3500,
-      stabilityRounds: parseInt(document.getElementById('qRounds').value)||3,
-      sampleSize: parseInt(document.getElementById('sampleSize').value)||1,
-      stabilityInterval: 5,
-      shuffle: true,
-    }
+  // فقط quick override — saved config کامل در سرور هست
+  const quickSettings = JSON.stringify({
+    threads: parseInt(document.getElementById('qThreads').value)||200,
+    timeout: parseInt(document.getElementById('qTimeout').value)||8,
+    maxLatency: parseInt(document.getElementById('qMaxLat').value)||3500,
+    stabilityRounds: parseInt(document.getElementById('qRounds').value)||3,
+    sampleSize: parseInt(document.getElementById('sampleSize').value)||1,
   });
 
   const btn = document.getElementById('btnStart');
   btn.disabled = true;
   const res = await fetch('/api/scan/start', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({config: scanCfg, ipRanges: ipInput, maxIPs})
+    body: JSON.stringify({quickSettings, ipRanges: ipInput, maxIPs})
   });
   const data = await res.json();
   btn.disabled = false;
@@ -917,6 +913,18 @@ function loadSavedSettings() {
         if(s.sampleSize) setVal('sampleSize', s.sampleSize);
       } catch(e){ console.warn('load settings err', e); }
     }
+    // نمایش خلاصه تنظیمات active
+    fetch('/api/config/active').then(r=>r.json()).then(a=>{
+      const parts = [
+        'threads:'+a.threads,
+        'timeout:'+a.timeout+'s',
+        'rounds:'+a.stabilityRounds,
+        'frag:'+a.fragmentMode,
+      ];
+      if(a.speedTest) parts.push('speed:ON');
+      if(a.proxy) parts.push('proxy:'+a.proxy);
+      document.getElementById('configSummary').textContent = parts.join(' · ');
+    });
     // Load saved TUI history
     fetch('/api/tui/stream').then(r=>r.json()).then(data=>{
       if(data.lines&&data.lines.length){
