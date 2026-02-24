@@ -133,6 +133,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ips/expand", s.handleIPExpand)
 	mux.HandleFunc("/api/config/save", s.handleConfigSave)
 	mux.HandleFunc("/api/config/load", s.handleConfigLoad)
+	mux.HandleFunc("/api/config/active", s.handleConfigActive)
 	mux.HandleFunc("/api/tui/stream", s.handleTUIStream)
 }
 
@@ -156,9 +157,9 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ConfigJSON string `json:"config"`
-		IPRanges   string `json:"ipRanges"`
-		MaxIPs     int    `json:"maxIPs"`
+		QuickSettings string `json:"quickSettings"` // فقط override های سریع
+		IPRanges      string `json:"ipRanges"`
+		MaxIPs        int    `json:"maxIPs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request: "+err.Error(), 400)
@@ -173,16 +174,14 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.state.mu.Unlock()
 
-	// Parse config — merge saved proxy config with scan settings
-	cfg, err := s.buildMergedConfig(req.ConfigJSON)
+	// بیلد config: saved config کامل + quick override
+	cfg, err := s.buildMergedConfig(req.QuickSettings)
 	if err != nil {
 		jsonError(w, "config parse error: "+err.Error(), 400)
 		return
 	}
 
-	// Start scan in background
 	go s.runScan(cfg, req.IPRanges, req.MaxIPs)
-
 	jsonOK(w, "scan started")
 }
 
@@ -756,7 +755,32 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, "saved")
 }
 
-func (s *Server) handleConfigLoad(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleConfigActive(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.buildMergedConfig("")
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"threads":         cfg.Scan.Threads,
+		"timeout":         cfg.Scan.Timeout,
+		"maxLatency":      cfg.Scan.MaxLatency,
+		"stabilityRounds": cfg.Scan.StabilityRounds,
+		"stabilityInterval": cfg.Scan.StabilityInterval,
+		"packetLossCount": cfg.Scan.PacketLossCount,
+		"speedTest":       cfg.Scan.SpeedTest,
+		"jitterTest":      cfg.Scan.JitterTest,
+		"maxPacketLossPct": cfg.Scan.MaxPacketLossPct,
+		"minDownloadMbps": cfg.Scan.MinDownloadMbps,
+		"minUploadMbps":   cfg.Scan.MinUploadMbps,
+		"testUrl":         cfg.Scan.TestURL,
+		"fragmentMode":    cfg.Fragment.Mode,
+		"proxy":           cfg.Proxy.Address,
+	})
+}
+
+
 	s.state.mu.RLock()
 	defer s.state.mu.RUnlock()
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -766,16 +790,16 @@ func (s *Server) handleConfigLoad(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// buildMergedConfig — proxy config از لینک parse شده + scan settings از UI رو merge میکنه
-func (s *Server) buildMergedConfig(scanConfigJSON string) (*config.Config, error) {
-	// Start with default
+// buildMergedConfig — saved config کامل رو لود میکنه + quick override اعمال میکنه
+func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, error) {
 	cfg := config.DefaultConfig()
 
-	// Apply saved proxy config first
 	s.state.mu.RLock()
 	proxyJSON := s.state.SavedProxyConfig
+	scanJSON := s.state.SavedScanConfig
 	s.state.mu.RUnlock()
 
+	// ۱. proxy config از لینک parse شده
 	if proxyJSON != "" {
 		var proxyCfg config.Config
 		if err := json.Unmarshal([]byte(proxyJSON), &proxyCfg); err == nil {
@@ -784,47 +808,45 @@ func (s *Server) buildMergedConfig(scanConfigJSON string) (*config.Config, error
 		}
 	}
 
-	// Apply scan config from UI (overrides scan-related fields only)
-	if scanConfigJSON != "" {
-		var partial struct {
+	// ۲. saved scan config کامل (از صفحه تنظیمات)
+	if scanJSON != "" {
+		var saved struct {
 			Scan     *config.ScanConfig     `json:"scan"`
 			Fragment *config.FragmentConfig `json:"fragment"`
 			Xray     *config.XrayConfig     `json:"xray"`
 			Shodan   *config.ShodanConfig   `json:"shodan"`
 		}
-		if err := json.Unmarshal([]byte(scanConfigJSON), &partial); err == nil {
-			if partial.Scan != nil {
-				// merge scan settings
-				s := partial.Scan
-				if s.Threads > 0 { cfg.Scan.Threads = s.Threads }
-				if s.Timeout > 0 { cfg.Scan.Timeout = s.Timeout }
-				if s.MaxLatency > 0 { cfg.Scan.MaxLatency = s.MaxLatency }
-				if s.Retries > 0 { cfg.Scan.Retries = s.Retries }
-				if s.MaxIPs > 0 { cfg.Scan.MaxIPs = s.MaxIPs }
-				if s.SampleSize > 0 { cfg.Scan.SampleSize = s.SampleSize }
-				if s.TestURL != "" { cfg.Scan.TestURL = s.TestURL }
-				if s.StabilityRounds >= 0 { cfg.Scan.StabilityRounds = s.StabilityRounds }
-				if s.StabilityInterval > 0 { cfg.Scan.StabilityInterval = s.StabilityInterval }
-				if s.PacketLossCount > 0 { cfg.Scan.PacketLossCount = s.PacketLossCount }
-				cfg.Scan.MaxPacketLossPct = s.MaxPacketLossPct
-				cfg.Scan.MinDownloadMbps = s.MinDownloadMbps
-				cfg.Scan.MinUploadMbps = s.MinUploadMbps
-				cfg.Scan.SpeedTest = s.SpeedTest
-				cfg.Scan.JitterTest = s.JitterTest
-				cfg.Scan.Shuffle = s.Shuffle
-				if s.DownloadURL != "" { cfg.Scan.DownloadURL = s.DownloadURL }
-				if s.UploadURL != "" { cfg.Scan.UploadURL = s.UploadURL }
+		if err := json.Unmarshal([]byte(scanJSON), &saved); err == nil {
+			if saved.Scan != nil {
+				cfg.Scan = *saved.Scan
 			}
-			if partial.Fragment != nil && proxyJSON == "" {
-				// only override fragment if no proxy config was loaded (proxy config has its own fragment)
-				cfg.Fragment = *partial.Fragment
+			if saved.Fragment != nil && proxyJSON == "" {
+				cfg.Fragment = *saved.Fragment
 			}
-			if partial.Xray != nil {
-				cfg.Xray = *partial.Xray
+			if saved.Xray != nil {
+				cfg.Xray = *saved.Xray
 			}
-			if partial.Shodan != nil {
-				cfg.Shodan = *partial.Shodan
+			if saved.Shodan != nil {
+				cfg.Shodan = *saved.Shodan
 			}
+		}
+	}
+
+	// ۳. quick override از دکمه شروع (فقط فیلدهایی که صریحاً داده شدن)
+	if quickOverrideJSON != "" {
+		var q struct {
+			Threads         *int     `json:"threads"`
+			Timeout         *int     `json:"timeout"`
+			MaxLatency      *int     `json:"maxLatency"`
+			StabilityRounds *int     `json:"stabilityRounds"`
+			SampleSize      *int     `json:"sampleSize"`
+		}
+		if err := json.Unmarshal([]byte(quickOverrideJSON), &q); err == nil {
+			if q.Threads != nil && *q.Threads > 0 { cfg.Scan.Threads = *q.Threads }
+			if q.Timeout != nil && *q.Timeout > 0 { cfg.Scan.Timeout = *q.Timeout }
+			if q.MaxLatency != nil && *q.MaxLatency > 0 { cfg.Scan.MaxLatency = *q.MaxLatency }
+			if q.StabilityRounds != nil { cfg.Scan.StabilityRounds = *q.StabilityRounds }
+			if q.SampleSize != nil && *q.SampleSize > 0 { cfg.Scan.SampleSize = *q.SampleSize }
 		}
 	}
 
