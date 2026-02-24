@@ -23,18 +23,19 @@ func NewOptimizer(config FinderConfig, tester TesterFunc) *Optimizer {
 	}
 }
 
-// FindOptimalRanges finds optimal fragment ranges for all three zones
-// Uses default zones: tlshello, 1-3, 1-5
+// FindOptimalRanges finds optimal fragment ranges for all five zones
+// Zones: tlshello, 1-3, 1-5, 1-10, random
 func (o *Optimizer) FindOptimalRanges(
 	ctx context.Context,
 	sizeRange Range,
 	intervalRange Range,
 ) ([]ZoneResult, error) {
-	// Define the three zones
 	zones := []Zone{
 		{Name: "tlshello", SizeRange: sizeRange, IntervalRange: intervalRange},
 		{Name: "1-3", SizeRange: sizeRange, IntervalRange: intervalRange},
 		{Name: "1-5", SizeRange: sizeRange, IntervalRange: intervalRange},
+		{Name: "1-10", SizeRange: sizeRange, IntervalRange: intervalRange},
+		{Name: "random", SizeRange: sizeRange, IntervalRange: intervalRange},
 	}
 
 	return o.FindOptimalRangesForZones(ctx, zones)
