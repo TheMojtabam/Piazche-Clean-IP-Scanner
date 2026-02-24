@@ -208,9 +208,9 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		QuickSettings string `json:"quickSettings"` // فقط override های سریع
-		IPRanges      string `json:"ipRanges"`
-		MaxIPs        int    `json:"maxIPs"`
+		QuickSettings json.RawMessage `json:"quickSettings"` // فقط override های سریع
+		IPRanges      string          `json:"ipRanges"`
+		MaxIPs        int             `json:"maxIPs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request: "+err.Error(), 400)
@@ -225,8 +225,14 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.state.mu.Unlock()
 
+	// تبدیل quickSettings به string برای buildMergedConfig
+	quickSettingsStr := ""
+	if len(req.QuickSettings) > 0 && string(req.QuickSettings) != "null" {
+		quickSettingsStr = string(req.QuickSettings)
+	}
+
 	// بیلد config: saved config کامل + quick override
-	cfg, err := s.buildMergedConfig(req.QuickSettings)
+	cfg, err := s.buildMergedConfig(quickSettingsStr)
 	if err != nil {
 		jsonError(w, "config parse error: "+err.Error(), 400)
 		return
