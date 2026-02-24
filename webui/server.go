@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,50 @@ import (
 	"piyazche/shodan"
 	"piyazche/utils"
 )
+
+// ── Disk Persistence ─────────────────────────────────────────────────────────
+
+type persistedState struct {
+	ProxyConfig string `json:"proxyConfig"`
+	ScanConfig  string `json:"scanConfig"`
+}
+
+// configPersistPath returns the path for UI config.
+// Checks ./piyazche_ui.json first, falls back to ~/.piyazche/ui.json
+func configPersistPath() string {
+	local := "piyazche_ui.json"
+	// Try to create a temp file to check writability
+	if f, err := os.OpenFile(local, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		f.Close()
+		return local
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return local
+	}
+	dir := filepath.Join(home, ".piyazche")
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, "ui.json")
+}
+
+func saveStateToDisk(proxyJSON, scanJSON string) {
+	data, _ := json.MarshalIndent(persistedState{ProxyConfig: proxyJSON, ScanConfig: scanJSON}, "", "  ")
+	os.WriteFile(configPersistPath(), data, 0644)
+}
+
+func loadStateFromDisk() (proxyJSON, scanJSON string) {
+	data, err := os.ReadFile(configPersistPath())
+	if err != nil {
+		return "", ""
+	}
+	var ps persistedState
+	if json.Unmarshal(data, &ps) != nil {
+		return "", ""
+	}
+	return ps.ProxyConfig, ps.ScanConfig
+}
+
+// ── Server ────────────────────────────────────────────────────────────────────
 
 // Server — Web UI HTTP server
 type Server struct {
@@ -78,9 +124,14 @@ type ScanSession struct {
 
 // NewServer یه server جدید می‌سازه
 func NewServer(port int) *Server {
+	// Load persisted UI config from disk
+	proxyJSON, scanJSON := loadStateFromDisk()
+
 	state := &AppState{
-		ScanStatus: "idle",
-		Sessions:   []ScanSession{},
+		ScanStatus:       "idle",
+		Sessions:         []ScanSession{},
+		SavedProxyConfig: proxyJSON,
+		SavedScanConfig:  scanJSON,
 	}
 
 	hub := NewWSHub()
@@ -737,8 +788,8 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ProxyConfig string `json:"proxyConfig"` // from parsed link
-		ScanConfig  string `json:"scanConfig"`  // from settings UI
+		ProxyConfig string `json:"proxyConfig"`
+		ScanConfig  string `json:"scanConfig"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request", 400)
@@ -751,7 +802,13 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	if req.ScanConfig != "" {
 		s.state.SavedScanConfig = req.ScanConfig
 	}
+	proxyJSON := s.state.SavedProxyConfig
+	scanJSON := s.state.SavedScanConfig
 	s.state.mu.Unlock()
+
+	// Persist to disk so config survives restarts
+	go saveStateToDisk(proxyJSON, scanJSON)
+
 	jsonOK(w, "saved")
 }
 
@@ -804,11 +861,14 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 		var proxyCfg config.Config
 		if err := json.Unmarshal([]byte(proxyJSON), &proxyCfg); err == nil {
 			cfg.Proxy = proxyCfg.Proxy
-			cfg.Fragment = proxyCfg.Fragment
+			// Fragment from proxy link is a fallback only; settings UI overrides it below
+			if proxyCfg.Fragment.Mode != "" {
+				cfg.Fragment = proxyCfg.Fragment
+			}
 		}
 	}
 
-	// ۲. saved scan config کامل (از صفحه تنظیمات)
+	// ۲. saved scan config (from settings UI) — always overrides proxy fragment
 	if scanJSON != "" {
 		var saved struct {
 			Scan     *config.ScanConfig     `json:"scan"`
@@ -820,7 +880,8 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 			if saved.Scan != nil {
 				cfg.Scan = *saved.Scan
 			}
-			if saved.Fragment != nil && proxyJSON == "" {
+			if saved.Fragment != nil {
+				// Settings UI fragment ALWAYS wins, even when proxy link is set
 				cfg.Fragment = *saved.Fragment
 			}
 			if saved.Xray != nil {
