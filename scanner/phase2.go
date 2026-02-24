@@ -250,14 +250,17 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 			latencies = append(latencies, connResult.Latency.Milliseconds())
 		}
 
-		// Packet loss
-		pingTimeout := 3 * time.Second
-		plTotal := pingTimeout*time.Duration(plCount) + 2*time.Second
-		plCtx, plCancel := context.WithTimeout(ctx, plTotal)
-		loss, plErr := xray.TestPacketLoss(plCtx, port, cfg.Scan.TestURL, plCount, pingTimeout)
+		// Packet loss — advanced با آمار کامل
+		pingTimeout := 4 * time.Second
+		plCtx, plCancel := context.WithTimeout(ctx, pingTimeout*time.Duration(plCount)+8*time.Second)
+		plRes, plErr := xray.TestPacketLossAdvanced(plCtx, port, cfg.Scan.TestURL, plCount, pingTimeout)
 		plCancel()
-		if plErr == nil {
-			lossTotal += loss
+		if plErr == nil && plRes != nil {
+			lossTotal += plRes.LossPct
+			// اگه latency از پینگ بهتره، به عنوان sample اضافه کنه
+			if plRes.Received > 0 && plRes.AvgRTT > 0 {
+				latencies = append(latencies, plRes.AvgRTT.Milliseconds())
+			}
 		} else {
 			lossTotal += 100
 		}
