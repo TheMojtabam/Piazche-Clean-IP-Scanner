@@ -308,15 +308,45 @@ done:
 	}
 	p2.AvgLatencyMs = float64(sum) / float64(len(latencies))
 
-	// Jitter
-	if cfg.Scan.JitterTest && len(latencies) > 1 {
-		var variance float64
-		for _, l := range latencies {
-			diff := float64(l) - p2.AvgLatencyMs
-			variance += diff * diff
+	// Jitter — RFC 3550 style: mean of |diff between consecutive samples|
+	// This is more stable than variance and matches what tools like ping report.
+	// Also remove outliers (samples > 3x median) before computing.
+	if cfg.Scan.JitterTest && len(latencies) >= 2 {
+		// Sort a copy to find median for outlier detection
+		sorted := make([]int64, len(latencies))
+		copy(sorted, latencies)
+		for i := 1; i < len(sorted); i++ {
+			for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+			}
 		}
-		variance /= float64(len(latencies))
-		p2.JitterMs = math.Sqrt(variance)
+		median := sorted[len(sorted)/2]
+		threshold := median * 3
+		if threshold < 500 {
+			threshold = 500 // always allow at least 500ms
+		}
+
+		// Filter outliers
+		var clean []int64
+		for _, l := range latencies {
+			if l <= threshold {
+				clean = append(clean, l)
+			}
+		}
+		if len(clean) < 2 {
+			clean = latencies // fallback: use all if too many were filtered
+		}
+
+		// Consecutive differences (RFC 3550)
+		var diffSum float64
+		for i := 1; i < len(clean); i++ {
+			d := float64(clean[i]) - float64(clean[i-1])
+			if d < 0 {
+				d = -d
+			}
+			diffSum += d
+		}
+		p2.JitterMs = diffSum / float64(len(clean)-1)
 	}
 
 	// Packet Loss میانگین
@@ -324,7 +354,7 @@ done:
 		p2.PacketLossPct = lossTotal / float64(roundsDone)
 	}
 
-	// Speed Test — فقط download (upload حذف شد چون دقیق نبود)
+	// Speed Test — Phase 2 only: download + upload
 	if cfg.Scan.SpeedTest {
 		dlURL := cfg.Scan.DownloadURL
 		if dlURL == "" {
@@ -335,6 +365,17 @@ done:
 		dlCancel()
 		if dlErr == nil && dlBps > 0 {
 			p2.DownloadMbps = dlBps / 1024 / 1024 * 8
+		}
+
+		ulURL := cfg.Scan.UploadURL
+		if ulURL == "" {
+			ulURL = "https://speed.cloudflare.com/__up"
+		}
+		ulCtx, ulCancel := context.WithTimeout(ctx, 25*time.Second)
+		ulBps, ulErr := xray.TestUploadSpeed(ulCtx, port, ulURL, 25*time.Second)
+		ulCancel()
+		if ulErr == nil && ulBps > 0 {
+			p2.UploadMbps = ulBps / 1024 / 1024 * 8
 		}
 	}
 
