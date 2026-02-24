@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -21,6 +23,36 @@ type TestResult struct {
 	Error      error
 	StatusCode int
 	BytesRead  int64
+}
+
+// makeSOCKSClient یه http.Client با SOCKS5 proxy می‌سازه
+func makeSOCKSClient(socksPort int, host string, timeout time.Duration, keepAlive bool) (*http.Client, error) {
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			return dialer.Dial(network, addr)
+		},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: false, ServerName: host},
+		DisableKeepAlives:   !keepAlive,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
 }
 
 // TestConnectivity tests connectivity through the SOCKS proxy
@@ -40,40 +72,13 @@ func TestConnectivityWithContext(ctx context.Context, socksPort int, testURL str
 		return result
 	}
 
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	client, err := makeSOCKSClient(socksPort, parsedURL.Hostname(), timeout, false)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+		result.Error = err
 		return result
 	}
 
-	// Route HTTP traffic through the xray SOCKS proxy
-	transport := &http.Transport{
-		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
-			}
-			return dialer.Dial(network, addr)
-		},
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			ServerName:         parsedURL.Hostname(),
-		},
-		DisableKeepAlives: true,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
 	start := time.Now()
-
 	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to create request: %w", err)
@@ -91,7 +96,6 @@ func TestConnectivityWithContext(ctx context.Context, socksPort int, testURL str
 	}
 	defer resp.Body.Close()
 
-	// Read the body so we measure the full request time
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024))
 	if err != nil {
 		if ctx.Err() != nil {
@@ -106,91 +110,25 @@ func TestConnectivityWithContext(ctx context.Context, socksPort int, testURL str
 	result.StatusCode = resp.StatusCode
 	result.BytesRead = int64(len(body))
 	result.Success = resp.StatusCode >= 200 && resp.StatusCode < 400
-
 	return result
 }
 
 // TestSpeed performs a speed test by downloading a file
 func TestSpeed(socksPort int, testURL string, timeout time.Duration) (bytesPerSecond float64, err error) {
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
-	if err != nil {
-		return 0, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
-	}
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		},
-		DisableKeepAlives: true,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-	}
-
-	start := time.Now()
-	resp, err := client.Get(testURL)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	n, err := io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return 0, err
-	}
-
-	duration := time.Since(start).Seconds()
-	if duration > 0 {
-		bytesPerSecond = float64(n) / duration
-	}
-
-	return bytesPerSecond, nil
-}
-
-// IsPortOpen checks if a port is open on the given host
-func IsPortOpen(host string, port int) bool {
-	address := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// SpeedTestResult contains download and upload speeds
-type SpeedTestResult struct {
-	DownloadBps float64
-	UploadBps   float64
-	Error       error
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return TestDownloadSpeed(ctx, socksPort, testURL, timeout)
 }
 
 // TestDownloadSpeed measures download speed through the SOCKS proxy
 func TestDownloadSpeed(ctx context.Context, socksPort int, downloadURL string, timeout time.Duration) (bytesPerSecond float64, err error) {
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	parsedURL, err := url.Parse(downloadURL)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+		return 0, fmt.Errorf("invalid URL: %w", err)
 	}
-
-	transport := &http.Transport{
-		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
-			}
-			return dialer.Dial(network, addr)
-		},
-		DisableKeepAlives: true,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
+	client, err := makeSOCKSClient(socksPort, parsedURL.Hostname(), timeout, false)
+	if err != nil {
+		return 0, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
@@ -209,63 +147,210 @@ func TestDownloadSpeed(ctx context.Context, socksPort int, downloadURL string, t
 	if err != nil && ctx.Err() == nil {
 		return 0, err
 	}
-
-	duration := time.Since(start).Seconds()
-	if duration > 0 && n > 0 {
-		bytesPerSecond = float64(n) / duration
+	elapsed := time.Since(start).Seconds()
+	if elapsed <= 0 || n == 0 {
+		return 0, fmt.Errorf("no data received")
 	}
-	return bytesPerSecond, nil
+	return float64(n) / elapsed, nil
 }
 
 // TestUploadSpeed measures upload speed through the SOCKS proxy
 func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeout time.Duration) (bytesPerSecond float64, err error) {
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	parsedURL, err := url.Parse(uploadURL)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+		return 0, fmt.Errorf("invalid URL: %w", err)
+	}
+	client, err := makeSOCKSClient(socksPort, parsedURL.Hostname(), timeout, false)
+	if err != nil {
+		return 0, err
 	}
 
-	// 1 MB upload payload
-	uploadSize := int64(1 * 1024 * 1024)
-	payload := io.LimitReader(zeroReader{}, uploadSize)
-
-	transport := &http.Transport{
-		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
+	// 5MB upload
+	const uploadSize = 5 * 1024 * 1024
+	pr, pw := io.Pipe()
+	go func() {
+		buf := make([]byte, 32*1024)
+		var written int64
+		for written < uploadSize {
+			n := int64(len(buf))
+			if written+n > uploadSize {
+				n = uploadSize - written
 			}
-			return dialer.Dial(network, addr)
-		},
-		DisableKeepAlives: true,
-	}
+			pw.Write(buf[:n])
+			written += n
+		}
+		pw.Close()
+	}()
 
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, payload)
+	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, pr)
 	if err != nil {
+		pr.Close()
 		return 0, err
 	}
 	req.ContentLength = uploadSize
-	req.Header.Set("Content-Type", "application/octet-stream")
 
 	start := time.Now()
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	duration := time.Since(start).Seconds()
-	if duration > 0 {
-		bytesPerSecond = float64(uploadSize) / duration
+	if resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}
-	return bytesPerSecond, nil
+	elapsed := time.Since(start).Seconds()
+	if elapsed <= 0 {
+		return 0, fmt.Errorf("upload too fast / no data")
+	}
+	return uploadSize / elapsed, nil
+}
+
+// PacketLossResult نتیجه تست packet loss
+type PacketLossResult struct {
+	Sent     int
+	Received int
+	Lost     int
+	LossPct  float64
+	AvgRTT   time.Duration
+	MinRTT   time.Duration
+	MaxRTT   time.Duration
+}
+
+// TestPacketLossAdvanced - packet loss رو با connection pool بهینه اندازه‌گیری می‌کنه
+// بهتر از TestPacketLoss: concurrent pings، connection reuse، آمار کامل‌تر
+func TestPacketLossAdvanced(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (*PacketLossResult, error) {
+	if count <= 0 {
+		count = 5
+	}
+
+	parsedURL, err := url.Parse(testURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// یه client با keepalive برای reuse connection — پینگ واقعی‌تر
+	client, err := makeSOCKSClient(socksPort, parsedURL.Hostname(), pingTimeout*time.Duration(count)+5*time.Second, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// concurrent pings با سمافور (max 3 همزمان)
+	concurrency := 3
+	if count < concurrency {
+		concurrency = count
+	}
+
+	type pingResult struct {
+		rtt  time.Duration
+		ok   bool
+	}
+
+	results := make([]pingResult, count)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	var mu sync.Mutex
+	_ = mu
+
+	// warm up connection
+	warmReq, _ := http.NewRequestWithContext(ctx, "HEAD", testURL, nil)
+	client.Do(warmReq)
+
+	var successCount int64
+
+	for i := 0; i < count; i++ {
+		select {
+		case <-ctx.Done():
+			// بقیه رو lost حساب کن
+			for j := i; j < count; j++ {
+				results[j] = pingResult{ok: false}
+			}
+			goto compute
+		default:
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
+			defer cancel()
+
+			req, e := http.NewRequestWithContext(pingCtx, "HEAD", testURL, nil)
+			if e != nil {
+				results[idx] = pingResult{ok: false}
+				return
+			}
+
+			start := time.Now()
+			resp, e := client.Do(req)
+			rtt := time.Since(start)
+
+			if e != nil || resp == nil {
+				results[idx] = pingResult{ok: false}
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			ok := resp.StatusCode >= 100 && resp.StatusCode < 600
+			results[idx] = pingResult{rtt: rtt, ok: ok}
+			if ok {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}(i)
+
+		// کمی بین pingها صبر کن تا burst نباشه
+		if i < count-1 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+	}
+
+	wg.Wait()
+
+compute:
+	res := &PacketLossResult{Sent: count}
+	var totalRTT time.Duration
+	first := true
+
+	for _, r := range results {
+		if r.ok {
+			res.Received++
+			totalRTT += r.rtt
+			if first {
+				res.MinRTT = r.rtt
+				res.MaxRTT = r.rtt
+				first = false
+			} else {
+				if r.rtt < res.MinRTT {
+					res.MinRTT = r.rtt
+				}
+				if r.rtt > res.MaxRTT {
+					res.MaxRTT = r.rtt
+				}
+			}
+		}
+	}
+	res.Lost = res.Sent - res.Received
+	if res.Received > 0 {
+		res.AvgRTT = totalRTT / time.Duration(res.Received)
+	}
+	res.LossPct = float64(res.Lost) / float64(res.Sent) * 100
+	return res, nil
+}
+
+// TestPacketLoss - backward compat wrapper
+func TestPacketLoss(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (lossPercent float64, err error) {
+	res, err := TestPacketLossAdvanced(ctx, socksPort, testURL, count, pingTimeout)
+	if err != nil {
+		return 100, err
+	}
+	return res.LossPct, nil
 }
 
 // zeroReader is an io.Reader that returns zeros
@@ -276,82 +361,4 @@ func (z zeroReader) Read(p []byte) (n int, err error) {
 		p[i] = 0
 	}
 	return len(p), nil
-}
-
-// TestPacketLoss sends n pings through the proxy and measures packet loss
-func TestPacketLoss(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (lossPercent float64, err error) {
-	if count <= 0 {
-		count = 5
-	}
-
-	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
-	if err != nil {
-		return 100, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
-	}
-
-	parsedURL, err := url.Parse(testURL)
-	if err != nil {
-		return 100, fmt.Errorf("invalid URL: %w", err)
-	}
-
-	lost := 0
-	for i := 0; i < count; i++ {
-		select {
-		case <-ctx.Done():
-			lost += count - i
-			goto done
-		default:
-		}
-
-		func() {
-			// هر ping timeout مستقل داره
-			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
-			defer cancel()
-
-			transport := &http.Transport{
-				DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-					return dialer.Dial(network, addr)
-				},
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: false,
-					ServerName:         parsedURL.Hostname(),
-				},
-				DisableKeepAlives: true,
-			}
-
-			client := &http.Client{
-				Transport: transport,
-				Timeout:   pingTimeout,
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}
-
-			req, e := http.NewRequestWithContext(pingCtx, "GET", testURL, nil)
-			if e != nil {
-				lost++
-				return
-			}
-			resp, e := client.Do(req)
-			if e != nil {
-				lost++
-			} else {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
-		}()
-
-		if i < count-1 {
-			select {
-			case <-ctx.Done():
-				lost += count - i - 1
-				goto done
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-	}
-done:
-	lossPercent = float64(lost) / float64(count) * 100
-	return lossPercent, nil
 }
