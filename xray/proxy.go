@@ -8,8 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -155,6 +153,7 @@ func TestDownloadSpeed(ctx context.Context, socksPort int, downloadURL string, t
 }
 
 // TestUploadSpeed measures upload speed through the SOCKS proxy
+// Uses a timed writer to measure actual bytes-sent-per-second, not total RTT.
 func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeout time.Duration) (bytesPerSecond float64, err error) {
 	parsedURL, err := url.Parse(uploadURL)
 	if err != nil {
@@ -165,21 +164,22 @@ func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeo
 		return 0, err
 	}
 
-	// 5MB upload
-	const uploadSize = 5 * 1024 * 1024
+	// 8MB non-compressible payload (random-ish pattern)
+	const uploadSize = 8 * 1024 * 1024
+	buf := make([]byte, uploadSize)
+	for i := range buf {
+		buf[i] = byte((i*7 + 13) & 0xFF)
+	}
+
+	// Pipe: goroutine writes to pw, HTTP reads from pr
 	pr, pw := io.Pipe()
+	writeStart := time.Now() // start timer before goroutine (conservative)
+	var bytesWritten int64
+
 	go func() {
-		buf := make([]byte, 32*1024)
-		var written int64
-		for written < uploadSize {
-			n := int64(len(buf))
-			if written+n > uploadSize {
-				n = uploadSize - written
-			}
-			pw.Write(buf[:n])
-			written += n
-		}
-		pw.Close()
+		n, werr := pw.Write(buf)
+		bytesWritten = int64(n)
+		pw.CloseWithError(werr)
 	}()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, pr)
@@ -188,169 +188,108 @@ func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeo
 		return 0, err
 	}
 	req.ContentLength = uploadSize
+	req.Header.Set("Content-Type", "application/octet-stream")
+	// Cloudflare __up needs this header
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", uploadSize))
 
-	start := time.Now()
 	resp, err := client.Do(req)
-	if err != nil && ctx.Err() == nil {
-		return 0, err
-	}
+	elapsed := time.Since(writeStart).Seconds()
+
 	if resp != nil {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	elapsed := time.Since(start).Seconds()
-	if elapsed <= 0 {
-		return 0, fmt.Errorf("upload too fast / no data")
+	if err != nil && ctx.Err() == nil {
+		return 0, fmt.Errorf("upload request failed: %w", err)
 	}
-	return uploadSize / elapsed, nil
+	if elapsed <= 0.1 || bytesWritten == 0 {
+		return 0, fmt.Errorf("upload elapsed too short: %.2fs", elapsed)
+	}
+	return float64(bytesWritten) / elapsed, nil
 }
 
-// PacketLossResult نتیجه تست packet loss
-type PacketLossResult struct {
-	Sent     int
-	Received int
-	Lost     int
-	LossPct  float64
-	AvgRTT   time.Duration
-	MinRTT   time.Duration
-	MaxRTT   time.Duration
+// repeatReader یه reader که یه slice داده رو یکبار میده
+type repeatReader struct {
+	data      []byte
+	pos       int
+	remaining int
 }
 
-// TestPacketLossAdvanced - packet loss رو با connection pool بهینه اندازه‌گیری می‌کنه
-// بهتر از TestPacketLoss: concurrent pings، connection reuse، آمار کامل‌تر
-func TestPacketLossAdvanced(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (*PacketLossResult, error) {
+func (r *repeatReader) Read(p []byte) (n int, err error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n = copy(p, r.data[r.pos:])
+	if n > r.remaining {
+		n = r.remaining
+	}
+	r.pos += n
+	if r.pos >= len(r.data) {
+		r.pos = 0
+	}
+	r.remaining -= n
+	return n, nil
+}
+
+// TestPacketLoss - sequential pings through SOCKS proxy
+func TestPacketLoss(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (lossPercent float64, err error) {
 	if count <= 0 {
 		count = 5
 	}
 
 	parsedURL, err := url.Parse(testURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+		return 100, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// یه client با keepalive برای reuse connection — پینگ واقعی‌تر
-	client, err := makeSOCKSClient(socksPort, parsedURL.Hostname(), pingTimeout*time.Duration(count)+5*time.Second, true)
-	if err != nil {
-		return nil, err
-	}
-
-	// concurrent pings با سمافور (max 3 همزمان)
-	concurrency := 3
-	if count < concurrency {
-		concurrency = count
-	}
-
-	type pingResult struct {
-		rtt  time.Duration
-		ok   bool
-	}
-
-	results := make([]pingResult, count)
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, concurrency)
-	var mu sync.Mutex
-	_ = mu
-
-	// warm up connection
-	warmReq, _ := http.NewRequestWithContext(ctx, "HEAD", testURL, nil)
-	client.Do(warmReq)
-
-	var successCount int64
-
+	lost := 0
 	for i := 0; i < count; i++ {
 		select {
 		case <-ctx.Done():
-			// بقیه رو lost حساب کن
-			for j := i; j < count; j++ {
-				results[j] = pingResult{ok: false}
-			}
-			goto compute
+			lost += count - i
+			break
 		default:
 		}
 
-		wg.Add(1)
-		sem <- struct{}{}
+		// هر ping یه client جدید با DisableKeepAlives — مثل ping واقعی
+		client, e := makeSOCKSClient(socksPort, parsedURL.Hostname(), pingTimeout, false)
+		if e != nil {
+			lost++
+			continue
+		}
 
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
+		func() {
 			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 			defer cancel()
 
 			req, e := http.NewRequestWithContext(pingCtx, "HEAD", testURL, nil)
 			if e != nil {
-				results[idx] = pingResult{ok: false}
+				lost++
 				return
 			}
-
-			start := time.Now()
 			resp, e := client.Do(req)
-			rtt := time.Since(start)
-
 			if e != nil || resp == nil {
-				results[idx] = pingResult{ok: false}
+				lost++
 				return
 			}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-
-			ok := resp.StatusCode >= 100 && resp.StatusCode < 600
-			results[idx] = pingResult{rtt: rtt, ok: ok}
-			if ok {
-				atomic.AddInt64(&successCount, 1)
+			if resp.StatusCode < 100 || resp.StatusCode >= 600 {
+				lost++
 			}
-		}(i)
+		}()
 
-		// کمی بین pingها صبر کن تا burst نباشه
 		if i < count-1 {
 			select {
 			case <-ctx.Done():
-			case <-time.After(150 * time.Millisecond):
+				lost += count - i - 1
+				goto done
+			case <-time.After(200 * time.Millisecond):
 			}
 		}
 	}
-
-	wg.Wait()
-
-compute:
-	res := &PacketLossResult{Sent: count}
-	var totalRTT time.Duration
-	first := true
-
-	for _, r := range results {
-		if r.ok {
-			res.Received++
-			totalRTT += r.rtt
-			if first {
-				res.MinRTT = r.rtt
-				res.MaxRTT = r.rtt
-				first = false
-			} else {
-				if r.rtt < res.MinRTT {
-					res.MinRTT = r.rtt
-				}
-				if r.rtt > res.MaxRTT {
-					res.MaxRTT = r.rtt
-				}
-			}
-		}
-	}
-	res.Lost = res.Sent - res.Received
-	if res.Received > 0 {
-		res.AvgRTT = totalRTT / time.Duration(res.Received)
-	}
-	res.LossPct = float64(res.Lost) / float64(res.Sent) * 100
-	return res, nil
-}
-
-// TestPacketLoss - backward compat wrapper
-func TestPacketLoss(ctx context.Context, socksPort int, testURL string, count int, pingTimeout time.Duration) (lossPercent float64, err error) {
-	res, err := TestPacketLossAdvanced(ctx, socksPort, testURL, count, pingTimeout)
-	if err != nil {
-		return 100, err
-	}
-	return res.LossPct, nil
+done:
+	return float64(lost) / float64(count) * 100, nil
 }
 
 // IsPortOpen checks if a TCP port is accepting connections
