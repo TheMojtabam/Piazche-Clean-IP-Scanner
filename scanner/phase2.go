@@ -34,12 +34,13 @@ type Phase2Result struct {
 }
 
 // RunPhase2 takes the successful IPs from phase-1 and runs deep tests
-// concurrency=4: سریع‌تر از sequential، بدون port exhaustion
 func RunPhase2(ctx context.Context, cfg *config.Config, phase1Results []Result) []Phase2Result {
 	return RunPhase2WithCallback(ctx, cfg, phase1Results, nil)
 }
 
 // RunPhase2WithCallback مثل RunPhase2 ولی هر بار که یه IP تموم شد callback میزنه
+// معماری جدید: هر IP یه xray instance جداگانه داره ولی log level رو none میذاره
+// تا terminal پر از Error نشه. Upload test حذف شد چون دقیق نبود.
 func RunPhase2WithCallback(ctx context.Context, cfg *config.Config, phase1Results []Result, onDone func(Phase2Result)) []Phase2Result {
 	rounds := cfg.Scan.StabilityRounds
 	if rounds <= 0 {
@@ -61,7 +62,9 @@ func RunPhase2WithCallback(ctx context.Context, cfg *config.Config, phase1Result
 		return nil
 	}
 
-	concurrency := 8
+	// concurrency محدود: هر worker یه xray instance داره
+	// بیشتر از 4 باعث port exhaustion میشه
+	concurrency := 4
 	if len(candidates) < concurrency {
 		concurrency = len(candidates)
 	}
@@ -72,7 +75,6 @@ func RunPhase2WithCallback(ctx context.Context, cfg *config.Config, phase1Result
 		utils.Gray, utils.Reset, rounds,
 		utils.Gray, utils.Reset, interval,
 		utils.Gray, utils.Reset, concurrency)
-
 
 	total := len(candidates)
 	final := make([]Phase2Result, total)
@@ -98,44 +100,37 @@ func RunPhase2WithCallback(ctx context.Context, cfg *config.Config, phase1Result
 			p2 := testIPPhase2(ctx, cfg, ip, rounds, interval)
 			applyFilters(cfg, &p2)
 
-			done := atomic.AddInt64(&doneCount, 1)
+			done := int(atomic.AddInt64(&doneCount, 1))
+			_ = done
+			_ = done
 
-			statusIcon := utils.Green + "✓" + utils.Reset
+			statusIcon := fmt.Sprintf("%s✓%s", utils.Green, utils.Reset)
 			statusStr := ""
+			plColor := utils.Green
 			if !p2.Passed {
-				statusIcon = utils.Red + "✗" + utils.Reset
+				statusIcon = fmt.Sprintf("%s✗%s", utils.Red, utils.Reset)
 				statusStr = fmt.Sprintf(" %s(%s)%s", utils.Red, p2.FailReason, utils.Reset)
+				plColor = utils.Red
+			}
+			if p2.PacketLossPct > 30 {
+				plColor = utils.Red
+			} else if p2.PacketLossPct > 10 {
+				plColor = utils.Yellow
 			}
 
 			jitterStr := ""
 			if cfg.Scan.JitterTest {
-				jColor := utils.Green
-				if p2.JitterMs > 50 {
-					jColor = utils.Red
-				} else if p2.JitterMs > 20 {
-					jColor = utils.Yellow
-				}
-				jitterStr = fmt.Sprintf(" %sJ:%s%s%.0fms%s", utils.Gray, utils.Reset, jColor, p2.JitterMs, utils.Reset)
+				jitterStr = fmt.Sprintf(" %sJ:%s%s%.0fms%s", utils.Gray, utils.Reset, utils.Magenta, p2.JitterMs, utils.Reset)
 			}
-
-			plColor := utils.Green
-			if p2.PacketLossPct > 20 {
-				plColor = utils.Red
-			} else if p2.PacketLossPct > 5 {
-				plColor = utils.Yellow
-			}
-
 			speedStr := ""
-			if cfg.Scan.SpeedTest {
+			if cfg.Scan.SpeedTest && p2.DownloadMbps > 0 {
 				dlColor := utils.Green
 				if p2.DownloadMbps < 1 {
 					dlColor = utils.Red
 				} else if p2.DownloadMbps < 5 {
 					dlColor = utils.Yellow
 				}
-				speedStr = fmt.Sprintf(" %s↓%s%s%.1fM%s %s↑%s%.1fM",
-					utils.Blue, utils.Reset, dlColor, p2.DownloadMbps, utils.Reset,
-					utils.Blue, utils.Reset, p2.UploadMbps)
+				speedStr = fmt.Sprintf(" %s↓%s%s%.1fM%s", utils.Blue, utils.Reset, dlColor, p2.DownloadMbps, utils.Reset)
 			}
 
 			mu.Lock()
@@ -182,7 +177,11 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 	port := utils.AcquirePort()
 	defer utils.ReleasePort(port)
 
-	xrayConfig, err := config.GenerateXrayConfig(cfg, ip, port)
+	// log level رو none بذار تا terminal پر از Error نشه
+	p2Cfg := *cfg
+	p2Cfg.Xray.LogLevel = "none"
+
+	xrayConfig, err := config.GenerateXrayConfig(&p2Cfg, ip, port)
 	if err != nil {
 		p2.FailReason = "config error"
 		return p2
@@ -190,14 +189,13 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 
 	manager := xray.NewManagerWithDebug(false)
 
-	// Retry up to 3 times with a different port if start fails
 	var startErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			utils.ReleasePort(port)
-			time.Sleep(150 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 			port = utils.AcquirePort()
-			xrayConfig, err = config.GenerateXrayConfig(cfg, ip, port)
+			xrayConfig, err = config.GenerateXrayConfig(&p2Cfg, ip, port)
 			if err != nil {
 				p2.FailReason = "config error"
 				return p2
@@ -207,35 +205,35 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 		if startErr == nil {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond)
 	}
 	if startErr != nil {
-		p2.FailReason = fmt.Sprintf("xray start failed: %v", startErr)
+		p2.FailReason = "xray start failed"
 		return p2
 	}
 	defer manager.Stop()
 
-	readyCtx, readyCancel := context.WithTimeout(ctx, 8*time.Second)
-	if err := manager.WaitForReadyWithContext(readyCtx, 8*time.Second); err != nil {
+	readyCtx, readyCancel := context.WithTimeout(ctx, 6*time.Second)
+	if err := manager.WaitForReadyWithContext(readyCtx, 6*time.Second); err != nil {
 		readyCancel()
-		p2.FailReason = fmt.Sprintf("xray not ready: %v", err)
+		p2.FailReason = "xray not ready"
 		return p2
 	}
 	readyCancel()
 
-	timeout := time.Duration(cfg.Scan.Timeout) * time.Second
-	if timeout < 10*time.Second {
-		timeout = 10 * time.Second
+	connTimeout := time.Duration(cfg.Scan.Timeout) * time.Second
+	if connTimeout < 10*time.Second {
+		connTimeout = 10 * time.Second
 	}
-
-	var latencies []int64
-	var lossTotal float64
-	roundsDone := 0
 
 	plCount := cfg.Scan.PacketLossCount
 	if plCount <= 0 {
 		plCount = 5
 	}
+
+	var latencies []int64
+	var lossTotal float64
+	roundsDone := 0
 
 	for round := 0; round < rounds; round++ {
 		select {
@@ -244,26 +242,40 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 		default:
 		}
 
-		// Latency sample
-		connResult := xray.TestConnectivityWithContext(ctx, port, cfg.Scan.TestURL, timeout)
+		// ۱. Latency — یه HTTP request ساده
+		connResult := xray.TestConnectivityWithContext(ctx, port, cfg.Scan.TestURL, connTimeout)
 		if connResult.Success {
 			latencies = append(latencies, connResult.Latency.Milliseconds())
 		}
 
-		// Packet loss — advanced با آمار کامل
+		// ۲. Packet Loss — sequential HEAD requests (نه concurrent، نه keepalive)
+		lost := 0
 		pingTimeout := 4 * time.Second
-		plCtx, plCancel := context.WithTimeout(ctx, pingTimeout*time.Duration(plCount)+8*time.Second)
-		plRes, plErr := xray.TestPacketLossAdvanced(plCtx, port, cfg.Scan.TestURL, plCount, pingTimeout)
-		plCancel()
-		if plErr == nil && plRes != nil {
-			lossTotal += plRes.LossPct
-			// اگه latency از پینگ بهتره، به عنوان sample اضافه کنه
-			if plRes.Received > 0 && plRes.AvgRTT > 0 {
-				latencies = append(latencies, plRes.AvgRTT.Milliseconds())
+		for i := 0; i < plCount; i++ {
+			select {
+			case <-ctx.Done():
+				lost += plCount - i
+				goto plDone
+			default:
 			}
-		} else {
-			lossTotal += 100
+
+			pingCtx, pingCancel := context.WithTimeout(ctx, pingTimeout)
+			ok := doSimplePing(pingCtx, port, cfg.Scan.TestURL)
+			pingCancel()
+			if !ok {
+				lost++
+			}
+
+			// کمی بین پینگها صبر کن
+			if i < plCount-1 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(300 * time.Millisecond):
+				}
+			}
 		}
+	plDone:
+		lossTotal += float64(lost) / float64(plCount) * 100
 		roundsDone++
 
 		if round < rounds-1 {
@@ -276,62 +288,53 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 	}
 
 done:
-	if len(latencies) > 0 {
-		var sum int64
-		p2.MinLatencyMs = latencies[0]
-		p2.MaxLatencyMs = latencies[0]
-		for _, l := range latencies {
-			sum += l
-			if l < p2.MinLatencyMs {
-				p2.MinLatencyMs = l
-			}
-			if l > p2.MaxLatencyMs {
-				p2.MaxLatencyMs = l
-			}
-		}
-		p2.AvgLatencyMs = float64(sum) / float64(len(latencies))
-
-		if cfg.Scan.JitterTest && len(latencies) > 1 {
-			var variance float64
-			for _, l := range latencies {
-				diff := float64(l) - p2.AvgLatencyMs
-				variance += diff * diff
-			}
-			variance /= float64(len(latencies))
-			p2.JitterMs = math.Sqrt(variance)
-		}
-	} else {
+	if len(latencies) == 0 {
 		p2.FailReason = "no successful latency samples"
 		return p2
 	}
 
+	// آمار latency
+	var sum int64
+	p2.MinLatencyMs = latencies[0]
+	p2.MaxLatencyMs = latencies[0]
+	for _, l := range latencies {
+		sum += l
+		if l < p2.MinLatencyMs {
+			p2.MinLatencyMs = l
+		}
+		if l > p2.MaxLatencyMs {
+			p2.MaxLatencyMs = l
+		}
+	}
+	p2.AvgLatencyMs = float64(sum) / float64(len(latencies))
+
+	// Jitter
+	if cfg.Scan.JitterTest && len(latencies) > 1 {
+		var variance float64
+		for _, l := range latencies {
+			diff := float64(l) - p2.AvgLatencyMs
+			variance += diff * diff
+		}
+		variance /= float64(len(latencies))
+		p2.JitterMs = math.Sqrt(variance)
+	}
+
+	// Packet Loss میانگین
 	if roundsDone > 0 {
 		p2.PacketLossPct = lossTotal / float64(roundsDone)
 	}
 
-	// Speed Test با timeout بزرگ‌تر (30s download، 20s upload)
+	// Speed Test — فقط download (upload حذف شد چون دقیق نبود)
 	if cfg.Scan.SpeedTest {
 		dlURL := cfg.Scan.DownloadURL
 		if dlURL == "" {
-			dlURL = "https://speed.cloudflare.com/__down?bytes=10000000"
+			dlURL = "https://speed.cloudflare.com/__down?bytes=5000000"
 		}
-		ulURL := cfg.Scan.UploadURL
-		if ulURL == "" {
-			ulURL = "https://speed.cloudflare.com/__up"
-		}
-
-		dlCtx, dlCancel := context.WithTimeout(ctx, 30*time.Second)
-		dlBps, dlErr := xray.TestDownloadSpeed(dlCtx, port, dlURL, 30*time.Second)
+		dlCtx, dlCancel := context.WithTimeout(ctx, 25*time.Second)
+		dlBps, dlErr := xray.TestDownloadSpeed(dlCtx, port, dlURL, 25*time.Second)
 		dlCancel()
 		if dlErr == nil && dlBps > 0 {
 			p2.DownloadMbps = dlBps / 1024 / 1024 * 8
-		}
-
-		ulCtx, ulCancel := context.WithTimeout(ctx, 20*time.Second)
-		ulBps, ulErr := xray.TestUploadSpeed(ulCtx, port, ulURL, 20*time.Second)
-		ulCancel()
-		if ulErr == nil && ulBps > 0 {
-			p2.UploadMbps = ulBps / 1024 / 1024 * 8
 		}
 	}
 
@@ -348,6 +351,14 @@ done:
 	return p2
 }
 
+// doSimplePing یه HEAD request ساده بدون keepalive میزنه
+func doSimplePing(ctx context.Context, socksPort int, testURL string) bool {
+	// از TestConnectivityWithContext استفاده میکنیم که ساده‌ترین روشه
+	result := xray.TestConnectivityWithContext(ctx, socksPort, testURL, 4*time.Second)
+	return result.Success
+}
+
+
 func applyFilters(cfg *config.Config, p2 *Phase2Result) {
 	if !p2.Passed {
 		return
@@ -362,12 +373,6 @@ func applyFilters(cfg *config.Config, p2 *Phase2Result) {
 	if cfg.Scan.MinDownloadMbps > 0 && p2.DownloadMbps < cfg.Scan.MinDownloadMbps {
 		p2.Passed = false
 		p2.FailReason = fmt.Sprintf("download %.1fMbps < min %.1fMbps", p2.DownloadMbps, cfg.Scan.MinDownloadMbps)
-		return
-	}
-
-	if cfg.Scan.MinUploadMbps > 0 && p2.UploadMbps < cfg.Scan.MinUploadMbps {
-		p2.Passed = false
-		p2.FailReason = fmt.Sprintf("upload %.1fMbps < min %.1fMbps", p2.UploadMbps, cfg.Scan.MinUploadMbps)
 		return
 	}
 }
@@ -399,7 +404,7 @@ func PrintPhase2Results(results []Phase2Result, n int, hasSpeed bool, hasJitter 
 		fmt.Printf("┬──────────")
 	}
 	if hasSpeed {
-		fmt.Printf("┬──────────────┬──────────────")
+		fmt.Printf("┬──────────────")
 	}
 	fmt.Printf("┬──────────┐%s\n", utils.Reset)
 
@@ -412,82 +417,55 @@ func PrintPhase2Results(results []Phase2Result, n int, hasSpeed bool, hasJitter 
 		fmt.Printf("%s│%s %8s ", utils.Gray, utils.Reset, utils.Bold+"Jitter"+utils.Reset)
 	}
 	if hasSpeed {
-		fmt.Printf("%s│%s %12s %s│%s %12s ",
-			utils.Gray, utils.Reset, utils.Bold+"Download"+utils.Reset,
-			utils.Gray, utils.Reset, utils.Bold+"Upload"+utils.Reset)
+		fmt.Printf("%s│%s %12s ", utils.Gray, utils.Reset, utils.Bold+"Download"+utils.Reset)
 	}
 	fmt.Printf("%s│%s\n", utils.Gray, utils.Reset)
 
-	fmt.Printf("%s├──────────────────────┼────────┼──────────┼───────────", utils.Gray)
-	if hasJitter {
-		fmt.Printf("┼──────────")
-	}
-	if hasSpeed {
-		fmt.Printf("┼──────────────┼──────────────")
-	}
-	fmt.Printf("┤%s\n", utils.Reset)
-
-	for i := 0; i < n; i++ {
-		r := passed[i]
+	for i, r := range passed {
+		if i >= n {
+			break
+		}
 
 		scoreColor := utils.Green
-		if r.StabilityScore < 50 {
+		if r.StabilityScore < 40 {
 			scoreColor = utils.Red
-		} else if r.StabilityScore < 75 {
+		} else if r.StabilityScore < 65 {
 			scoreColor = utils.Yellow
 		}
 
-		latColor := utils.Green
-		if r.AvgLatencyMs > 2000 {
-			latColor = utils.Red
-		} else if r.AvgLatencyMs > 1000 {
-			latColor = utils.Yellow
-		}
-
 		plColor := utils.Green
-		if r.PacketLossPct > 20 {
+		if r.PacketLossPct > 30 {
 			plColor = utils.Red
-		} else if r.PacketLossPct > 5 {
+		} else if r.PacketLossPct > 10 {
 			plColor = utils.Yellow
 		}
 
-		rank := fmt.Sprintf("%d.", i+1)
-		fmt.Printf("%s│%s %s%-2s%-17s %s│%s %s%5.1f%s %s│%s %s%6.0fms%s %s│%s %s%7.1f%%%s  ",
-			utils.Gray, utils.Reset, utils.Dim, rank, utils.Cyan+r.IP+utils.Reset, utils.Gray, utils.Reset,
-			scoreColor, r.StabilityScore, utils.Reset, utils.Gray, utils.Reset,
-			latColor, r.AvgLatencyMs, utils.Reset, utils.Gray, utils.Reset,
+		fmt.Printf("%s│%s %-20s %s│%s %s%6.0f%s %s│%s %s%6.0fms%s %s│%s %s%7.0f%%%s ",
+			utils.Gray, utils.Reset, r.IP,
+			utils.Gray, utils.Reset,
+			scoreColor, r.StabilityScore, utils.Reset,
+			utils.Gray, utils.Reset,
+			utils.Cyan, r.AvgLatencyMs, utils.Reset,
+			utils.Gray, utils.Reset,
 			plColor, r.PacketLossPct, utils.Reset)
 
 		if hasJitter {
-			jColor := utils.Green
-			if r.JitterMs > 50 {
-				jColor = utils.Red
-			} else if r.JitterMs > 20 {
-				jColor = utils.Yellow
-			}
-			fmt.Printf("%s│%s %s%6.0fms%s ", utils.Gray, utils.Reset, jColor, r.JitterMs, utils.Reset)
+			fmt.Printf("%s│%s %s%6.0fms%s ", utils.Gray, utils.Reset, utils.Magenta, r.JitterMs, utils.Reset)
 		}
-
 		if hasSpeed {
-			dlColor := utils.Green
-			if r.DownloadMbps < 1 {
-				dlColor = utils.Red
-			} else if r.DownloadMbps < 5 {
-				dlColor = utils.Yellow
+			dlColor := utils.Dim
+			dlStr := "    —"
+			if r.DownloadMbps > 0 {
+				dlStr = fmt.Sprintf("%5.1fMbps", r.DownloadMbps)
+				dlColor = utils.Green
+				if r.DownloadMbps < 1 {
+					dlColor = utils.Red
+				} else if r.DownloadMbps < 5 {
+					dlColor = utils.Yellow
+				}
 			}
-			ulColor := utils.Green
-			if r.UploadMbps < 0.5 {
-				ulColor = utils.Red
-			} else if r.UploadMbps < 2 {
-				ulColor = utils.Yellow
-			}
-			fmt.Printf("%s│%s %s%9.2f Mbps%s %s│%s %s%9.2f Mbps%s ",
-				utils.Gray, utils.Reset,
-				dlColor, r.DownloadMbps, utils.Reset,
-				utils.Gray, utils.Reset,
-				ulColor, r.UploadMbps, utils.Reset)
+			fmt.Printf("%s│%s %s%12s%s ", utils.Gray, utils.Reset, dlColor, dlStr, utils.Reset)
 		}
-
 		fmt.Printf("%s│%s\n", utils.Gray, utils.Reset)
 	}
 
@@ -496,81 +474,59 @@ func PrintPhase2Results(results []Phase2Result, n int, hasSpeed bool, hasJitter 
 		fmt.Printf("┴──────────")
 	}
 	if hasSpeed {
-		fmt.Printf("┴──────────────┴──────────────")
+		fmt.Printf("┴──────────────")
 	}
-	fmt.Printf("┘%s\n\n", utils.Reset)
+	fmt.Printf("┘%s\n", utils.Reset)
 }
 
-func SavePhase2Results(results []Phase2Result, format string, path string) error {
-	switch format {
-	case "json":
-		return SavePhase2ToJSON(results, path)
-	default:
-		return SavePhase2ToCSV(results, path)
-	}
-}
-
-func SavePhase2ToCSV(results []Phase2Result, path string) error {
-	dir := filepath.Dir(path)
+func SavePhase2Results(results []Phase2Result, dir string, hasSpeed bool) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+		return err
 	}
 
-	file, err := os.Create(path)
+	// Save CSV
+	csvPath := filepath.Join(dir, "phase2_results.csv")
+	f, err := os.Create(csvPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return err
 	}
-	defer file.Close()
+	defer f.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	header := []string{"IP", "Score", "Avg Latency (ms)", "Min Lat (ms)", "Max Lat (ms)", "Jitter (ms)", "Packet Loss (%)", "Download (Mbps)", "Upload (Mbps)", "Passed", "Fail Reason"}
-	writer.Write(header)
+	w := csv.NewWriter(f)
+	header := []string{"ip", "avg_latency_ms", "min_latency_ms", "max_latency_ms", "jitter_ms", "packet_loss_pct", "stability_score", "passed", "fail_reason"}
+	if hasSpeed {
+		header = append(header, "download_mbps")
+	}
+	w.Write(header)
 
 	for _, r := range results {
-		passed := "yes"
-		if !r.Passed {
-			passed = "no"
-		}
-		writer.Write([]string{
+		row := []string{
 			r.IP,
-			fmt.Sprintf("%.1f", r.StabilityScore),
-			fmt.Sprintf("%.0f", r.AvgLatencyMs),
+			fmt.Sprintf("%.1f", r.AvgLatencyMs),
 			fmt.Sprintf("%d", r.MinLatencyMs),
 			fmt.Sprintf("%d", r.MaxLatencyMs),
 			fmt.Sprintf("%.1f", r.JitterMs),
 			fmt.Sprintf("%.1f", r.PacketLossPct),
-			fmt.Sprintf("%.2f", r.DownloadMbps),
-			fmt.Sprintf("%.2f", r.UploadMbps),
-			passed,
+			fmt.Sprintf("%.1f", r.StabilityScore),
+			fmt.Sprintf("%t", r.Passed),
 			r.FailReason,
-		})
+		}
+		if hasSpeed {
+			row = append(row, fmt.Sprintf("%.2f", r.DownloadMbps))
+		}
+		w.Write(row)
 	}
-	return nil
-}
+	w.Flush()
 
-func SavePhase2ToJSON(results []Phase2Result, path string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	file, err := os.Create(path)
+	// Save JSON
+	jsonPath := filepath.Join(dir, "phase2_results.json")
+	jf, err := os.Create(jsonPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return err
 	}
-	defer file.Close()
+	defer jf.Close()
 
-	enc := json.NewEncoder(file)
+	enc := json.NewEncoder(jf)
 	enc.SetIndent("", "  ")
 	return enc.Encode(results)
-}
-
-func GeneratePhase2OutputPath(format string) string {
-	ext := "csv"
-	if format == "json" {
-		ext = "json"
-	}
-	return fmt.Sprintf("results/phase2_%s.%s", time.Now().Format("20060102_150405"), ext)
 }
