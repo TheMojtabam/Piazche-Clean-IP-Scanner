@@ -353,6 +353,17 @@ func TestPacketLoss(ctx context.Context, socksPort int, testURL string, count in
 	return res.LossPct, nil
 }
 
+// IsPortOpen checks if a TCP port is accepting connections
+func IsPortOpen(host string, port int) bool {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // zeroReader is an io.Reader that returns zeros
 type zeroReader struct{}
 
