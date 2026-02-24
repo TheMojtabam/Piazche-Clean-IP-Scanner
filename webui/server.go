@@ -780,7 +780,7 @@ func (s *Server) handleConfigActive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
+func (s *Server) handleConfigLoad(w http.ResponseWriter, r *http.Request) {
 	s.state.mu.RLock()
 	defer s.state.mu.RUnlock()
 	json.NewEncoder(w).Encode(map[string]interface{}{
