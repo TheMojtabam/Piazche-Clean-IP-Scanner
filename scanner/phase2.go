@@ -479,20 +479,38 @@ func PrintPhase2Results(results []Phase2Result, n int, hasSpeed bool, hasJitter 
 	fmt.Printf("┘%s\n", utils.Reset)
 }
 
-func SavePhase2Results(results []Phase2Result, dir string, hasSpeed bool) error {
+func SavePhase2Results(results []Phase2Result, format string, path string) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	// Save CSV
-	csvPath := filepath.Join(dir, "phase2_results.csv")
-	f, err := os.Create(csvPath)
+	if format == "json" {
+		jf, err := os.Create(path)
+		if err != nil {
+			return err
+		}
+		defer jf.Close()
+		enc := json.NewEncoder(jf)
+		enc.SetIndent("", "  ")
+		return enc.Encode(results)
+	}
+
+	// default: CSV
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
 	w := csv.NewWriter(f)
+	hasSpeed := false
+	for _, r := range results {
+		if r.DownloadMbps > 0 {
+			hasSpeed = true
+			break
+		}
+	}
 	header := []string{"ip", "avg_latency_ms", "min_latency_ms", "max_latency_ms", "jitter_ms", "packet_loss_pct", "stability_score", "passed", "fail_reason"}
 	if hasSpeed {
 		header = append(header, "download_mbps")
@@ -517,16 +535,16 @@ func SavePhase2Results(results []Phase2Result, dir string, hasSpeed bool) error 
 		w.Write(row)
 	}
 	w.Flush()
+	return w.Error()
+}
 
-	// Save JSON
-	jsonPath := filepath.Join(dir, "phase2_results.json")
-	jf, err := os.Create(jsonPath)
-	if err != nil {
-		return err
+// GeneratePhase2OutputPath generates a timestamped output file path for phase2 results
+func GeneratePhase2OutputPath(format string) string {
+	timestamp := time.Now().Format("2006-01-02_150405")
+	ext := format
+	if ext == "" {
+		ext = "csv"
 	}
-	defer jf.Close()
-
-	enc := json.NewEncoder(jf)
-	enc.SetIndent("", "  ")
-	return enc.Encode(results)
+	filename := fmt.Sprintf("%s_phase2.%s", timestamp, ext)
+	return filepath.Join("results", filename)
 }
