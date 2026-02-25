@@ -767,6 +767,7 @@ func (s *Server) runScan(cfg *config.Config, ipRanges string, maxIPs int) {
 		}
 		scnr.LoadIPsFromList(ips, 0, false)
 	} else {
+		// "" = embedded CF subnets (fallback اگه ipv4.txt نبود)
 		scnr.LoadIPs("ipv4.txt", maxIPs, cfg.Scan.Shuffle)
 	}
 
@@ -1298,6 +1299,7 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 			Fragment *config.FragmentConfig `json:"fragment"`
 			Xray     *config.XrayConfig     `json:"xray"`
 			Shodan   *config.ShodanConfig   `json:"shodan"`
+			Phase3   *config.Phase3Config   `json:"phase3"`
 		}
 		if err := json.Unmarshal([]byte(scanJSON), &saved); err == nil {
 			if saved.Scan != nil {
@@ -1312,6 +1314,22 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 			}
 			if saved.Shodan != nil {
 				cfg.Shodan = *saved.Shodan
+			}
+			// Phase3 — DownloadURL/UploadURL رو به Scan هم اعمال کن
+			if saved.Phase3 != nil {
+				cfg.Phase3 = *saved.Phase3
+				if saved.Phase3.DownloadURL != "" {
+					cfg.Scan.DownloadURL = saved.Phase3.DownloadURL
+				}
+				if saved.Phase3.UploadURL != "" {
+					cfg.Scan.UploadURL = saved.Phase3.UploadURL
+				}
+				if saved.Phase3.MinDLMbps > 0 {
+					cfg.Scan.MinDownloadMbps = saved.Phase3.MinDLMbps
+				}
+				if saved.Phase3.MinULMbps > 0 {
+					cfg.Scan.MinUploadMbps = saved.Phase3.MinULMbps
+				}
 			}
 		}
 	}
@@ -1697,11 +1715,23 @@ func (s *Server) handlePhase3Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// فقط SpeedTest رو فعال کن
+	// SpeedTest و BandwidthMode رو فعال کن
 	cfg.Scan.SpeedTest = true
-	cfg.Scan.DownloadURL = req.DownloadURL
-	cfg.Scan.UploadURL = req.UploadURL
+	cfg.Scan.BandwidthMode = config.BandwidthSpeedTest
+	if req.DownloadURL != "" {
+		cfg.Scan.DownloadURL = req.DownloadURL
+	}
+	if cfg.Scan.DownloadURL == "" {
+		cfg.Scan.DownloadURL = "https://speed.cloudflare.com/__down?bytes=5000000"
+	}
+	if req.UploadURL != "" {
+		cfg.Scan.UploadURL = req.UploadURL
+	}
+	if cfg.Scan.UploadURL == "" {
+		cfg.Scan.UploadURL = "https://speed.cloudflare.com/__up"
+	}
 	cfg.Scan.StabilityRounds = 1 // یه دور کافیه
+	cfg.Scan.PacketLossCount = 1  // phase3 فقط سرعت مهمه، packet loss نه
 
 	// Phase1 results مصنوعی بساز
 	var phase1Results []scanner.Result
