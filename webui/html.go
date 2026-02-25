@@ -10,10 +10,19 @@ const indexHTMLContent = `<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=Bebas+Neue&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <style>
 /* ══════════════════════════════════════════════════
-   THEME VARIABLES
+   THEME SYSTEM — 3 themes × day/night = 6 combos
 ══════════════════════════════════════════════════ */
+
+/* ── BASE SHARED ── */
 :root{
-  /* ── NEON NIGHT (default) ── */
+  --rad:10px;--rad-sm:6px;--rad-xs:4px;
+  --font-head:'Space Grotesk',sans-serif;
+  --font-mono:'Space Mono',monospace;
+}
+
+/* ══ NEON NIGHT (default) ══ */
+:root,
+[data-theme="neon-night"]{
   --bg:#04060a;--bg2:#07090f;--bg3:#0d1420;--bg4:#121a28;
   --bd:#1a2840;--bd2:#243350;--bd3:#2e4060;
   --tx:#e8f0ff;--tx2:#8aaad0;--dim:#4a6490;
@@ -23,17 +32,16 @@ const indexHTMLContent = `<!DOCTYPE html>
   --r:#ff3d75;--rd:rgba(255,61,117,.08);
   --p:#c060ff;--pd:rgba(192,96,255,.08);
   --o:#ff8800;
-  --rad:10px;--rad-sm:6px;--rad-xs:4px;
-  --font-head:'Space Grotesk',sans-serif;
-  --font-mono:'Space Mono',monospace;
   --glow-g:0 0 20px rgba(0,255,170,.4),0 0 6px rgba(0,255,170,.2);
   --glow-c:0 0 20px rgba(56,191,255,.4),0 0 6px rgba(56,191,255,.2);
   --glow-r:0 0 20px rgba(255,61,117,.4),0 0 6px rgba(255,61,117,.2);
   --glow-p:0 0 20px rgba(192,96,255,.4);
   --shadow:0 4px 24px rgba(0,0,0,.6);
+  --logo-filter:drop-shadow(0 0 8px rgba(56,191,255,.4));
 }
-[data-theme="day"]{
-  /* ── DAY MODE ── */
+
+/* ══ NEON DAY ══ */
+[data-theme="neon-day"]{
   --bg:#eef2fa;--bg2:#ffffff;--bg3:#e4eaf6;--bg4:#d8e2f0;
   --bd:#bfcfe6;--bd2:#aabcd8;--bd3:#90a8c8;
   --tx:#0f1e38;--tx2:#3a5580;--dim:#7090b8;
@@ -48,7 +56,137 @@ const indexHTMLContent = `<!DOCTYPE html>
   --glow-r:0 2px 10px rgba(204,0,51,.25);
   --glow-p:0 2px 10px rgba(102,0,187,.25);
   --shadow:0 2px 14px rgba(0,0,0,.12);
+  --logo-filter:drop-shadow(0 1px 3px rgba(0,119,221,.3));
 }
+
+/* ══ NAVY NIGHT ══ */
+[data-theme="navy-night"]{
+  --bg:#0a0e1a;--bg2:#0f1526;--bg3:#141c30;--bg4:#1a2540;
+  --bd:#1e2d4a;--bd2:#253660;--bd3:#2e4070;
+  --tx:#e8eaf6;--tx2:#7986cb;--dim:#3f51b5;
+  --g:#00e676;--gd:rgba(0,230,118,.08);--g2:#00c853;
+  --c:#4d8fff;--cd:rgba(77,143,255,.1);--c2:#1565c0;
+  --y:#ffab40;--yd:rgba(255,171,64,.08);
+  --r:#ff5252;--rd:rgba(255,82,82,.08);
+  --p:#ce93d8;--pd:rgba(206,147,216,.08);
+  --o:#ff6d00;
+  --glow-g:0 0 20px rgba(0,230,118,.35),0 0 6px rgba(0,230,118,.15);
+  --glow-c:0 0 20px rgba(77,143,255,.4),0 0 6px rgba(77,143,255,.2);
+  --glow-r:0 0 20px rgba(255,82,82,.4),0 0 6px rgba(255,82,82,.2);
+  --glow-p:0 0 20px rgba(206,147,216,.35);
+  --shadow:0 4px 24px rgba(0,0,0,.6);
+  --logo-filter:drop-shadow(0 0 10px rgba(77,143,255,.4));
+}
+
+/* ══ NAVY DAY ══ */
+[data-theme="navy-day"]{
+  --bg:#f0f4fb;--bg2:#ffffff;--bg3:#e6edf8;--bg4:#d8e4f4;
+  --bd:#c0d0e8;--bd2:#a8bedd;--bd3:#8aaacf;
+  --tx:#0d1b3e;--tx2:#2a4a80;--dim:#6080b0;
+  --g:#1b7a3e;--gd:rgba(27,122,62,.1);--g2:#155f30;
+  --c:#1565c0;--cd:rgba(21,101,192,.1);--c2:#0d47a1;
+  --y:#b06000;--yd:rgba(176,96,0,.1);
+  --r:#b71c1c;--rd:rgba(183,28,28,.1);
+  --p:#6a1b9a;--pd:rgba(106,27,154,.1);
+  --o:#bf360c;
+  --glow-g:0 2px 10px rgba(27,122,62,.25);
+  --glow-c:0 2px 10px rgba(21,101,192,.25);
+  --glow-r:0 2px 10px rgba(183,28,28,.25);
+  --glow-p:0 2px 10px rgba(106,27,154,.25);
+  --shadow:0 2px 14px rgba(0,0,0,.12);
+  --logo-filter:drop-shadow(0 1px 4px rgba(21,101,192,.3));
+}
+
+/* ══ WARM NIGHT ══ */
+[data-theme="warm-night"]{
+  --bg:#0e0b08;--bg2:#161109;--bg3:#1e160c;--bg4:#261d12;
+  --bd:#332619;--bd2:#44341f;--bd3:#55422a;
+  --tx:#f5e6cc;--tx2:#a08060;--dim:#6b4e2a;
+  --g:#7ec850;--gd:rgba(126,200,80,.08);--g2:#60a030;
+  --c:#5bc8ff;--cd:rgba(91,200,255,.08);--c2:#3090cc;
+  --y:#ffd966;--yd:rgba(255,217,102,.08);
+  --r:#ff4d4d;--rd:rgba(255,77,77,.08);
+  --p:#cc88ff;--pd:rgba(204,136,255,.08);
+  --o:#ff8c00;
+  --glow-g:0 0 20px rgba(126,200,80,.35),0 0 6px rgba(126,200,80,.15);
+  --glow-c:0 0 20px rgba(91,200,255,.35),0 0 6px rgba(91,200,255,.15);
+  --glow-r:0 0 20px rgba(255,77,77,.4),0 0 6px rgba(255,77,77,.2);
+  --glow-p:0 0 20px rgba(204,136,255,.35);
+  --shadow:0 4px 24px rgba(0,0,0,.7);
+  --logo-filter:drop-shadow(0 0 10px rgba(255,140,0,.35));
+}
+
+/* ══ WARM DAY ══ */
+[data-theme="warm-day"]{
+  --bg:#fdf6ec;--bg2:#ffffff;--bg3:#f5ebe0;--bg4:#ecddd0;
+  --bd:#ddc8b0;--bd2:#ccb098;--bd3:#b89880;
+  --tx:#2e1a08;--tx2:#7a4820;--dim:#a8703a;
+  --g:#3d7a1a;--gd:rgba(61,122,26,.1);--g2:#2d600f;
+  --c:#005588;--cd:rgba(0,85,136,.1);--c2:#003d66;
+  --y:#8a6000;--yd:rgba(138,96,0,.1);
+  --r:#aa1818;--rd:rgba(170,24,24,.1);
+  --p:#661a88;--pd:rgba(102,26,136,.1);
+  --o:#c05000;
+  --glow-g:0 2px 10px rgba(61,122,26,.25);
+  --glow-c:0 2px 10px rgba(0,85,136,.25);
+  --glow-r:0 2px 10px rgba(170,24,24,.25);
+  --glow-p:0 2px 10px rgba(102,26,136,.25);
+  --shadow:0 2px 14px rgba(0,0,0,.1);
+  --logo-filter:drop-shadow(0 1px 4px rgba(192,80,0,.3));
+}
+
+/* ── logo glow via variable ── */
+.logo{ filter:var(--logo-filter); }
+
+/* ── Theme picker modal ── */
+.theme-picker-overlay{
+  display:none;position:fixed;inset:0;
+  background:rgba(0,0,0,.6);backdrop-filter:blur(4px);
+  z-index:10000;align-items:center;justify-content:center;
+}
+.theme-picker-overlay.open{display:flex;}
+.theme-picker{
+  background:var(--bg2);border:1px solid var(--bd2);
+  border-radius:14px;padding:24px;width:480px;max-width:95vw;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);
+}
+.tp-title{
+  font-family:'Orbitron',monospace;font-size:14px;font-weight:700;
+  letter-spacing:2px;color:var(--c);margin-bottom:18px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.tp-close{
+  background:none;border:none;color:var(--dim);cursor:pointer;
+  font-size:18px;line-height:1;padding:2px 6px;
+  transition:color .15s;
+}
+.tp-close:hover{color:var(--tx)}
+.tp-section{margin-bottom:18px;}
+.tp-label{font-size:9px;color:var(--dim);letter-spacing:2px;text-transform:uppercase;font-family:var(--font-mono);margin-bottom:10px;}
+.tp-themes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+.tp-theme-btn{
+  background:var(--bg3);border:2px solid var(--bd2);
+  border-radius:8px;padding:10px 8px;cursor:pointer;
+  transition:all .15s;text-align:center;
+  font-family:var(--font-mono);font-size:10px;color:var(--tx2);
+}
+.tp-theme-btn:hover{border-color:var(--c);color:var(--tx)}
+.tp-theme-btn.active{border-color:var(--c);color:var(--c);background:var(--cd);}
+.tp-theme-btn .tp-swatch{
+  display:flex;gap:3px;justify-content:center;margin-bottom:6px;
+}
+.tp-swatch span{width:12px;height:12px;border-radius:50%;}
+.tp-mode{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.tp-mode-btn{
+  background:var(--bg3);border:2px solid var(--bd2);
+  border-radius:8px;padding:10px;cursor:pointer;
+  transition:all .15s;font-family:var(--font-mono);
+  font-size:11px;color:var(--tx2);display:flex;
+  align-items:center;justify-content:center;gap:8px;
+}
+.tp-mode-btn:hover{border-color:var(--c);color:var(--tx)}
+.tp-mode-btn.active{border-color:var(--c);color:var(--c);background:var(--cd);}
+.tp-mode-icon{font-size:18px;}
 *{margin:0;padding:0;box-sizing:border-box}
 html{height:100%}
 body{font-family:var(--font-head);background:var(--bg);color:var(--tx);height:100%;font-size:15px;line-height:1.6;overflow:hidden;transition:background .3s,color .3s}
@@ -70,10 +208,6 @@ body{font-family:var(--font-head);background:var(--bg);color:var(--tx);height:10
   user-select:none;
   background:linear-gradient(90deg,var(--c),var(--g),var(--p));
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-  filter:drop-shadow(0 0 8px rgba(56,191,255,.4));
-}
-[data-theme="day"] .logo{
-  filter:drop-shadow(0 1px 3px rgba(0,119,221,.3));
 }
 .status-pill{
   display:flex;align-items:center;gap:6px;
@@ -151,10 +285,6 @@ body{font-family:var(--font-head);background:var(--bg);color:var(--tx);height:10
 .phd-l h2{
   font-family:'Orbitron',monospace;font-size:18px;font-weight:700;
   letter-spacing:2px;
-  background:linear-gradient(90deg,var(--tx),var(--c));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-}
-[data-theme="day"] .phd-l h2{
   background:linear-gradient(90deg,var(--tx),var(--c));
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;
 }
@@ -391,9 +521,9 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   </div>
   <div class="tb-right">
     <span id="tbProgress" style="font-family:var(--font-mono);font-size:11px;color:var(--dim)"></span>
-    <button class="theme-btn" onclick="toggleTheme()" id="themeBtn">
-      <span class="theme-icon" id="themeIcon">☀</span>
-      <span id="themeTxt">DAY</span>
+    <button class="theme-btn" onclick="openThemePicker()" id="themeBtn" title="Change theme">
+      <span class="theme-icon" id="themeIcon">🌙</span>
+      <span id="themeTxt">NEON</span>
     </button>
   </div>
 </div>
@@ -852,35 +982,135 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
 </div><!-- /main -->
 </div><!-- /app -->
 
+<!-- ══ THEME PICKER MODAL ══ -->
+<div class="theme-picker-overlay" id="themePickerOverlay" onclick="closeThemePickerOutside(event)">
+  <div class="theme-picker">
+    <div class="tp-title">
+      <span>⬡ APPEARANCE</span>
+      <button class="tp-close" onclick="closeThemePicker()">✕</button>
+    </div>
+
+    <div class="tp-section">
+      <div class="tp-label">Theme</div>
+      <div class="tp-themes">
+        <button class="tp-theme-btn active" data-base="neon" onclick="selectThemeBase('neon',this)">
+          <div class="tp-swatch">
+            <span style="background:#38bfff"></span>
+            <span style="background:#00ffaa"></span>
+            <span style="background:#c060ff"></span>
+          </div>
+          NEON
+        </button>
+        <button class="tp-theme-btn" data-base="navy" onclick="selectThemeBase('navy',this)">
+          <div class="tp-swatch">
+            <span style="background:#4d8fff"></span>
+            <span style="background:#00e676"></span>
+            <span style="background:#ce93d8"></span>
+          </div>
+          NAVY
+        </button>
+        <button class="tp-theme-btn" data-base="warm" onclick="selectThemeBase('warm',this)">
+          <div class="tp-swatch">
+            <span style="background:#ff8c00"></span>
+            <span style="background:#ffd966"></span>
+            <span style="background:#5bc8ff"></span>
+          </div>
+          WARM
+        </button>
+      </div>
+    </div>
+
+    <div class="tp-section">
+      <div class="tp-label">Mode</div>
+      <div class="tp-mode">
+        <button class="tp-mode-btn" data-mode="night" onclick="selectThemeMode('night',this)">
+          <span class="tp-mode-icon">🌙</span>
+          <span>NIGHT</span>
+        </button>
+        <button class="tp-mode-btn active" data-mode="day" onclick="selectThemeMode('day',this)">
+          <span class="tp-mode-icon">☀️</span>
+          <span>DAY</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ══ STATE ══
 let ws=null,p1Results=[],p2Results=[],shodanIPs=[],tuiAS=true,viewingSession=false;
 let feedRows=[],maxFeedRows=100,currentTab='p2';
-let currentTheme='night';
 // localStorage key for history
 const LS_HISTORY='pyz_history_v2';
-const LS_THEME='pyz_theme_v2';
 
-// ══ THEME ══
-function toggleTheme(){
-  currentTheme=currentTheme==='night'?'day':'night';
-  applyTheme();
-  localStorage.setItem(LS_THEME,currentTheme);
-}
+// ══ THEME SYSTEM ══
+let currentThemeBase = 'neon';  // 'neon' | 'navy' | 'warm'
+let currentThemeMode = 'night'; // 'night' | 'day'
+const LS_THEME = 'pyz_theme_v3';
+
+const THEME_META = {
+  neon:  { label:'NEON',  icon:{ night:'🌙', day:'☀️' } },
+  navy:  { label:'NAVY',  icon:{ night:'🌙', day:'☀️' } },
+  warm:  { label:'WARM',  icon:{ night:'🌙', day:'☀️' } },
+};
+
+function buildThemeId(base, mode){ return base + '-' + mode; }
+
 function applyTheme(){
-  if(currentTheme==='day'){
-    document.documentElement.setAttribute('data-theme','day');
-    document.getElementById('themeIcon').textContent='🌙';
-    document.getElementById('themeTxt').textContent='NIGHT';
-  } else {
-    document.documentElement.removeAttribute('data-theme');
-    document.getElementById('themeIcon').textContent='☀';
-    document.getElementById('themeTxt').textContent='DAY';
-  }
+  const tid = buildThemeId(currentThemeBase, currentThemeMode);
+  document.documentElement.setAttribute('data-theme', tid);
+  const meta = THEME_META[currentThemeBase];
+  const icon = currentThemeMode === 'night' ? '🌙' : '☀️';
+  const el = document.getElementById('themeIcon');
+  const tx = document.getElementById('themeTxt');
+  if(el) el.textContent = icon;
+  if(tx) tx.textContent = meta.label;
+  localStorage.setItem(LS_THEME, JSON.stringify({ base: currentThemeBase, mode: currentThemeMode }));
+  // sync picker buttons
+  document.querySelectorAll('.tp-theme-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.base === currentThemeBase);
+  });
+  document.querySelectorAll('.tp-mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === currentThemeMode);
+  });
 }
+
+function selectThemeBase(base, btn){
+  currentThemeBase = base;
+  document.querySelectorAll('.tp-theme-btn').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  applyTheme();
+}
+
+function selectThemeMode(mode, btn){
+  currentThemeMode = mode;
+  document.querySelectorAll('.tp-mode-btn').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  applyTheme();
+}
+
+function openThemePicker(){
+  document.getElementById('themePickerOverlay').classList.add('open');
+}
+function closeThemePicker(){
+  document.getElementById('themePickerOverlay').classList.remove('open');
+}
+function closeThemePickerOutside(e){
+  if(e.target === document.getElementById('themePickerOverlay')) closeThemePicker();
+}
+
+// load saved theme
 (function(){
-  const t=localStorage.getItem(LS_THEME);
-  if(t){currentTheme=t;}
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_THEME));
+    if(saved && saved.base) currentThemeBase = saved.base;
+    if(saved && saved.mode) currentThemeMode = saved.mode;
+  } catch(e){}
+  // legacy migration
+  const oldTheme = localStorage.getItem('pyz_theme_v2');
+  if(oldTheme && !localStorage.getItem(LS_THEME)){
+    currentThemeMode = oldTheme === 'day' ? 'day' : 'night';
+  }
   applyTheme();
 })();
 
