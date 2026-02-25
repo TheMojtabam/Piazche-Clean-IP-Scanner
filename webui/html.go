@@ -1724,21 +1724,20 @@ function makeSparkline(history, times, width, height){
   pts.forEach((p,i)=>{
     if(p.v===0){
       // fail = red dot
-      dots+=`<circle cx="${p.x}" cy="${height-4}" r="2" fill="var(--r)" opacity="0.8"/>`;
+      dots+='<circle cx="'+p.x+'" cy="'+(height-4)+'" r="2" fill="var(--r)" opacity="0.8"/>';
       prev=null;
     } else {
       if(prev!==null){
         const col=p.v>300?'var(--r)':p.v>150?'var(--y)':'var(--g)';
-        path+=`<line x1="${prev.x}" y1="${prev.y}" x2="${p.x}" y2="${p.y}" stroke="${col}" stroke-width="1.5" opacity="0.9"/>`;
+        path+='<line x1="'+prev.x+'" y1="'+prev.y+'" x2="'+p.x+'" y2="'+p.y+'" stroke="'+col+'" stroke-width="1.5" opacity="0.9"/>';
       }
-      // tooltip circle (invisible, for hover)
       const title=p.t?new Date(p.t).toLocaleTimeString()+' '+p.v+'ms':p.v+'ms';
-      dots+=`<circle cx="${p.x}" cy="${p.y}" r="3" fill="transparent" stroke="none"><title>${title}</title></circle>`;
+      dots+='<circle cx="'+p.x+'" cy="'+p.y+'" r="3" fill="transparent" stroke="none"><title>'+title+'</title></circle>';
       prev=p;
     }
   });
 
-  return `<svg width="${width}" height="${height}" style="cursor:default">${path}${dots}</svg>`;
+  return '<svg width="'+width+'" height="'+height+'" style="cursor:default">'+path+dots+'</svg>';
 }
 
 let healthCache=[];
@@ -1774,8 +1773,8 @@ function renderHealthList(){
     // GeoIP badge
     const geo=e.geoInfo;
     const geoBadge=geo?
-      `<span style="font-size:9px;padding:1px 5px;background:var(--bg3);border-radius:3px;color:var(--dim);font-family:var(--font-mono)" title="${geo.isp||''}">${geo.countryCode||'?'} ${geo.city||''}</span>`:
-      `<button onclick="fetchGeoIP('${e.ip}')" style="font-size:9px;background:none;border:1px solid var(--dim);border-radius:3px;color:var(--dim);cursor:pointer;padding:1px 5px;font-family:var(--font-mono)">GeoIP</button>`;
+      '<span style="font-size:9px;padding:1px 5px;background:var(--bg3);border-radius:3px;color:var(--dim);font-family:var(--font-mono)" title="'+(geo.isp||'')+'">'+( geo.countryCode||'?')+' '+(geo.city||'')+'</span>':
+      '<button onclick="fetchGeoIP(\''+e.ip+'\')" style="font-size:9px;background:none;border:1px solid var(--dim);border-radius:3px;color:var(--dim);cursor:pointer;padding:1px 5px;font-family:var(--font-mono)">GeoIP</button>';
 
     // Sparkline
     const spark=showGraph&&e.latencyHistory&&e.latencyHistory.length>1?
