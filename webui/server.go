@@ -1484,6 +1484,7 @@ func (s *Server) handleHealthCheckNow(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealthAdd یه IP به monitor اضافه می‌کنه
+func (s *Server) handleHealthAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", 405)
 		return
