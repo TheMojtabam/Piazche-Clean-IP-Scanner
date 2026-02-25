@@ -1,0 +1,190 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 1.2.0)'
+        required: true
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, label: linux-amd64,       output: piyazche-linux-amd64       }
+          - { goos: linux,   goarch: arm64, label: linux-arm64,       output: piyazche-linux-arm64       }
+          - { goos: linux,   goarch: "386", label: linux-386,         output: piyazche-linux-386         }
+          - { goos: windows, goarch: amd64, label: windows-amd64,     output: piyazche-windows-amd64.exe }
+          - { goos: windows, goarch: "386", label: windows-386,       output: piyazche-windows-386.exe   }
+          - { goos: darwin,  goarch: amd64, label: darwin-amd64,      output: piyazche-darwin-amd64      }
+          - { goos: darwin,  goarch: arm64, label: darwin-arm64-m1,   output: piyazche-darwin-arm64      }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Tidy modules
+        run: go mod tidy
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w \
+              -X main.Version=${{ steps.ver.outputs.VERSION }} \
+              -X main.BuildTime=${{ steps.ver.outputs.BUILD_TIME }} \
+              -X main.Commit=${{ steps.ver.outputs.COMMIT }}" \
+            -o ${{ matrix.output }} .
+
+      - name: Smoke test (linux/amd64 only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          file ${{ matrix.output }}
+          ls -lh ${{ matrix.output }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag & version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "NAME=Piyazche v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "NAME=Piyazche ${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize & checksum
+        run: |
+          mkdir -p release
+          find artifacts -type f | while read f; do cp "$f" "release/$(basename $f)"; done
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          ls -lh
+
+      - name: Build release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.ver.outputs.VERSION }}"
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u '+%Y-%m-%d')
+          PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+
+          cat > notes.md << NOTES
+          ## Piyazche $VERSION
+
+          **Build:** \`$COMMIT\` &nbsp;·&nbsp; **Date:** $DATE
+
+          ---
+
+          ### دانلود
+
+          | سیستم‌عامل | معماری | فایل |
+          |---|---|---|
+          | 🐧 Linux | x86\_64 (64-bit) | \`piyazche-linux-amd64\` |
+          | 🐧 Linux | arm64 (Raspberry Pi 4 / VPS ARM) | \`piyazche-linux-arm64\` |
+          | 🐧 Linux | x86 (32-bit قدیمی) | \`piyazche-linux-386\` |
+          | 🪟 Windows | x86\_64 (64-bit) | \`piyazche-windows-amd64.exe\` |
+          | 🪟 Windows | x86 (32-bit) | \`piyazche-windows-386.exe\` |
+          | 🍎 macOS | Intel | \`piyazche-darwin-amd64\` |
+          | 🍎 macOS | Apple Silicon — M1 / M2 / M3 | \`piyazche-darwin-arm64\` |
+
+          > ✅ فایل \`SHA256SUMS.txt\` برای تأیید صحت فایل‌ها ضمیمه شده.
+
+          ---
+
+          ### نصب سریع
+
+          **Linux / macOS**
+          \`\`\`bash
+          curl -Lo piyazche https://github.com/YOUR_USER/YOUR_REPO/releases/download/v${VERSION}/piyazche-linux-amd64
+          chmod +x piyazche
+          ./piyazche --help
+          \`\`\`
+
+          **Windows (PowerShell)**
+          \`\`\`powershell
+          Invoke-WebRequest -Uri "https://github.com/YOUR_USER/YOUR_REPO/releases/download/v${VERSION}/piyazche-windows-amd64.exe" -OutFile piyazche.exe
+          .\piyazche.exe --help
+          \`\`\`
+
+          ---
+
+          ### تغییرات
+          NOTES
+
+          if [ -n "$PREV" ]; then
+            git log ${PREV}..HEAD --oneline --no-merges | head -25 | sed 's/^/- /' >> notes.md
+          else
+            echo "- First release" >> notes.md
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.TAG }}
+          name: ${{ steps.ver.outputs.NAME }}
+          body_path: notes.md
+          files: release/*
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.VERSION, 'alpha') || contains(steps.ver.outputs.VERSION, 'beta') || contains(steps.ver.outputs.VERSION, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
