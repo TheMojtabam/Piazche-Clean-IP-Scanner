@@ -23,11 +23,14 @@ import (
 // ── Disk Persistence ─────────────────────────────────────────────────────────
 
 type persistedState struct {
-	ProxyConfig   string                         `json:"proxyConfig"`
-	ScanConfig    string                         `json:"scanConfig"`
-	Templates     []config.ConfigTemplate        `json:"templates,omitempty"`
-	RawURL        string                         `json:"rawUrl,omitempty"`
-	HealthEntries map[string]*config.HealthEntry `json:"healthEntries,omitempty"`
+	ProxyConfig          string                         `json:"proxyConfig"`
+	ScanConfig           string                         `json:"scanConfig"`
+	Templates            []config.ConfigTemplate        `json:"templates,omitempty"`
+	RawURL               string                         `json:"rawUrl,omitempty"`
+	HealthEntries        map[string]*config.HealthEntry `json:"healthEntries,omitempty"`
+	HealthEnabled        *bool                          `json:"healthEnabled,omitempty"`
+	HealthIntervalMins   *int                           `json:"healthIntervalMins,omitempty"`
+	TrafficDetectEnabled *bool                          `json:"trafficDetect,omitempty"`
 }
 
 // configPersistPath returns the path for UI config.
@@ -48,7 +51,7 @@ func configPersistPath() string {
 	return filepath.Join(dir, "ui.json")
 }
 
-func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry) {
+func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool) {
 	// HealthEntries رو deep copy کن قبل از persist
 	heCopy := make(map[string]*config.HealthEntry, len(healthEntries))
 	for k, v := range healthEntries {
@@ -56,25 +59,48 @@ func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.Conf
 		heCopy[k] = &cp
 	}
 	data, _ := json.MarshalIndent(persistedState{
-		ProxyConfig:   proxyJSON,
-		ScanConfig:    scanJSON,
-		Templates:     templates,
-		RawURL:        rawURL,
-		HealthEntries: heCopy,
+		ProxyConfig:          proxyJSON,
+		ScanConfig:           scanJSON,
+		Templates:            templates,
+		RawURL:               rawURL,
+		HealthEntries:        heCopy,
+		HealthEnabled:        &healthEnabled,
+		HealthIntervalMins:   &healthIntervalMins,
+		TrafficDetectEnabled: &trafficDetect,
 	}, "", "  ")
 	os.WriteFile(configPersistPath(), data, 0644)
 }
 
-func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry) {
+// saveStateToDiskFromServer — helper که state رو از server می‌خونه و ذخیره میکنه
+func (s *Server) saveStateToDiskNow() {
+	s.state.mu.RLock()
+	proxyJSON := s.state.SavedProxyConfig
+	scanJSON := s.state.SavedScanConfig
+	rawURL := s.state.SavedRawURL
+	templates := make([]config.ConfigTemplate, len(s.state.Templates))
+	copy(templates, s.state.Templates)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
+	for k, v := range s.state.HealthEntries {
+		cp := *v
+		heCopy[k] = &cp
+	}
+	s.state.mu.RUnlock()
+	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
+}
+
+func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool) {
 	data, err := os.ReadFile(configPersistPath())
 	if err != nil {
-		return "", "", "", nil, nil
+		return "", "", "", nil, nil, nil, nil, nil
 	}
 	var ps persistedState
 	if json.Unmarshal(data, &ps) != nil {
-		return "", "", "", nil, nil
+		return "", "", "", nil, nil, nil, nil, nil
 	}
-	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries
+	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -170,13 +196,27 @@ type ScanSession struct {
 // NewServer یه server جدید می‌سازه
 func NewServer(port int) *Server {
 	// Load persisted UI config from disk
-	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries := loadStateFromDisk()
+	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect := loadStateFromDisk()
 
 	if savedTemplates == nil {
 		savedTemplates = []config.ConfigTemplate{}
 	}
 	if savedHealthEntries == nil {
 		savedHealthEntries = make(map[string]*config.HealthEntry)
+	}
+
+	// مقادیر پیش‌فرض monitor — بعد از لود از دیسک override میشن
+	healthEnabled := true
+	healthIntervalMins := 3
+	trafficDetect := false
+	if savedHealthEnabled != nil {
+		healthEnabled = *savedHealthEnabled
+	}
+	if savedHealthInterval != nil && *savedHealthInterval > 0 {
+		healthIntervalMins = *savedHealthInterval
+	}
+	if savedTrafficDetect != nil {
+		trafficDetect = *savedTrafficDetect
 	}
 
 	state := &AppState{
@@ -188,9 +228,9 @@ func NewServer(port int) *Server {
 		Templates:            savedTemplates,
 		HealthEntries:        savedHealthEntries,
 		healthStop:           make(chan struct{}),
-		HealthIntervalMins:   3,
-		HealthEnabled:        true,
-		TrafficDetectEnabled: false,
+		HealthIntervalMins:   healthIntervalMins,
+		HealthEnabled:        healthEnabled,
+		TrafficDetectEnabled: trafficDetect,
 	}
 
 	hub := NewWSHub()
@@ -443,7 +483,10 @@ func (s *Server) handleConfigParse(w http.ResponseWriter, r *http.Request) {
 		s.state.mu.Unlock()
 		heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 		for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
-		go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave)
+		healthEnabled := s.state.HealthEnabled
+		healthIntervalMins := s.state.HealthIntervalMins
+		trafficDetect := s.state.TrafficDetectEnabled
+		go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
 	}
 
 	cfgJSON, _ := json.MarshalIndent(cfg, "", "  ")
@@ -1230,7 +1273,10 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	// Persist to disk so config survives restarts
 	heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
 
 	jsonOK(w, "saved")
 }
@@ -1456,7 +1502,10 @@ func (s *Server) handleTemplateSave(w http.ResponseWriter, r *http.Request) {
 	// سیو روی دیسک
 	heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tmpl)
@@ -1490,7 +1539,10 @@ func (s *Server) handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	// سیو روی دیسک
 	heCopyForSave2 := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave2[k] = &cp }
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL2, templates2, heCopyForSave2)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	go saveStateToDisk(proxyJSON, scanJSON, rawURL2, templates2, heCopyForSave2, healthEnabled, healthIntervalMins, trafficDetect)
 
 	jsonOK(w, "deleted")
 }
@@ -1560,7 +1612,10 @@ func (s *Server) handleHealthAdd(w http.ResponseWriter, r *http.Request) {
 	for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 	s.state.mu.Unlock()
 
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
 
 	// Health monitor goroutine شروع کن (اگه قبلاً نبوده)
 	s.startHealthMonitor()
@@ -1606,7 +1661,10 @@ func (s *Server) handleHealthRemove(w http.ResponseWriter, r *http.Request) {
 	heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 	s.state.mu.Unlock()
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy)
+	healthEnabled := s.state.HealthEnabled
+	healthIntervalMins := s.state.HealthIntervalMins
+	trafficDetect := s.state.TrafficDetectEnabled
+	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
 	jsonOK(w, "removed")
 }
 
@@ -1683,6 +1741,8 @@ func (s *Server) handleHealthSettings(w http.ResponseWriter, r *http.Request) {
 		s.state.TrafficDetectEnabled = *req.TrafficDetect
 	}
 	s.state.mu.Unlock()
+	// تنظیمات رو روی دیسک ذخیره کن
+	go s.saveStateToDiskNow()
 	jsonOK(w, "settings updated")
 }
 
@@ -2050,7 +2110,10 @@ func (s *Server) handleFragmentAuto(w http.ResponseWriter, r *http.Request) {
 			heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 			for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 			s.state.mu.Unlock()
-			go saveStateToDisk(proxyJSON, string(b), rawURL, templates, heCopy)
+			healthEnabled := s.state.HealthEnabled
+			healthIntervalMins := s.state.HealthIntervalMins
+			trafficDetect := s.state.TrafficDetectEnabled
+			go saveStateToDisk(proxyJSON, string(b), rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
 
 			payload["applied"] = true
 		} else {
