@@ -246,7 +246,7 @@ func NewServer(port int) *Server {
 	s.registerRoutes(mux)
 
 	s.srv = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    fmt.Sprintf("0.0.0.0:%d", port),
 		Handler: mux,
 	}
 
@@ -949,6 +949,11 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
         <div><label>Max Lat (ms)</label><input type="number" id="qMaxLat" value="3500" style="font-size:11px;padding:4px 7px"></div>
         <div><label>P2 Rounds</label><input type="number" id="qRounds" value="3" min="0" style="font-size:11px;padding:4px 7px"></div>
         <div><label>Sample/Subnet</label><input type="number" id="sampleSize" value="1" min="1" style="font-size:11px;padding:4px 7px"></div>
+      </div>
+      <div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap">
+        <label class="chk-row" style="font-size:11px"><input type="checkbox" id="qJitter"> Jitter Test</label>
+        <label class="chk-row" style="font-size:11px"><input type="checkbox" id="qSpeedTest"> Speed Test (P3 inline)</label>
+        <span style="font-size:10px;color:var(--dim);font-family:var(--font-mono);align-self:center">PL Count: <input type="number" id="qPLCount" value="5" min="1" max="20" style="width:45px;font-size:10px;padding:2px 4px;display:inline"></span>
       </div>
     </div>
   </div>
@@ -1793,6 +1798,9 @@ async function startScan(){
     maxLatency:parseInt(document.getElementById('qMaxLat').value)||3500,
     stabilityRounds:parseInt(document.getElementById('qRounds').value)||3,
     sampleSize:parseInt(document.getElementById('sampleSize').value)||1,
+    jitterTest:document.getElementById('qJitter')?.checked||false,
+    speedTest:document.getElementById('qSpeedTest')?.checked||false,
+    packetLossCount:parseInt(document.getElementById('qPLCount')?.value)||5,
   };
   const btn=document.getElementById('btnStart');
   btn.disabled=true;
@@ -2133,6 +2141,9 @@ function saveConfig(){
   document.getElementById('qTimeout').value=scanCfg.scan.timeout;
   document.getElementById('qMaxLat').value=scanCfg.scan.maxLatency;
   document.getElementById('qRounds').value=scanCfg.scan.stabilityRounds;
+  const qJ=document.getElementById('qJitter');if(qJ) qJ.checked=scanCfg.scan.jitterTest||false;
+  const qST=document.getElementById('qSpeedTest');if(qST) qST.checked=scanCfg.scan.speedTest||false;
+  const qPL=document.getElementById('qPLCount');if(qPL) qPL.value=scanCfg.scan.packetLossCount||5;
   document.getElementById('sampleSize').value=scanCfg.scan.sampleSize;
   fetch('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scanConfig:JSON.stringify(scanCfg)})}).then(()=>{
     appendTUI({t:now(),l:'ok',m:'✓ Settings saved to disk'});
@@ -3427,11 +3438,28 @@ function hideStopConfirm(){
 // ══ INIT ══
 connectWS();
 initUnsavedTracking();
-fetch('/api/status').then(r=>r.json()).then(d=>setStatus(d.status||'idle',d.phase||''));
-loadSavedSettings();
-renderQuickRanges('cf');
-loadTemplates();
-loadMonitorSettings();
+// Connection check با timeout 3 ثانیه
+Promise.race([
+  fetch('/api/status').then(r=>r.json()),
+  new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),3000))
+]).then(d=>{
+  setStatus(d.status||'idle',d.phase||'');
+  loadSavedSettings();
+  renderQuickRanges('cf');
+  loadTemplates();
+  loadMonitorSettings();
+}).catch(err=>{
+  // نشون بده سرور جواب نمیده
+  const body=document.querySelector('.layout')||document.body;
+  const banner=document.createElement('div');
+  banner.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#ff4444;color:#fff;text-align:center;padding:10px;font-family:monospace;font-size:13px';
+  banner.textContent='⚠ Cannot connect to server — try refreshing or check if server is running on correct port';
+  document.body.prepend(banner);
+  loadSavedSettings();
+  renderQuickRanges('cf');
+  loadTemplates();
+  loadMonitorSettings();
+});
 </script>
 </body>
 </html>
