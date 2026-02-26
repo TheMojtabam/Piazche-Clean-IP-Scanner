@@ -83,6 +83,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/quicktest", s.handleQuickTest)
 	// System info
 	mux.HandleFunc("/api/sysinfo", s.handleSysInfo)
+	// IP Ranges persistence
+	mux.HandleFunc("/api/ranges/save", s.handleRangesSave)
+	mux.HandleFunc("/api/ranges/load", s.handleRangesLoad)
 }
 
 // --- API Handlers ---
@@ -1116,6 +1119,7 @@ func (s *Server) handleConfigLoad(w http.ResponseWriter, r *http.Request) {
 		"scanConfig":  s.state.SavedScanConfig,
 		"hasProxy":    s.state.SavedProxyConfig != "",
 		"rawUrl":      s.state.SavedRawURL,
+		"savedRanges": s.state.SavedRanges,
 	})
 }
 
@@ -2163,5 +2167,36 @@ func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
 		"uptime":      uptimeStr,
 		"threads":     threads,
 		"persistPath": configPersistPath(),
+	})
+}
+
+// handleRangesSave — ذخیره IP ranges روی دیسک
+func (s *Server) handleRangesSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		Ranges string `json:"ranges"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", 400)
+		return
+	}
+	s.state.mu.Lock()
+	s.state.SavedRanges = req.Ranges
+	s.state.mu.Unlock()
+	go s.saveStateToDiskNow()
+	jsonOK(w, "ranges saved")
+}
+
+// handleRangesLoad — لود IP ranges از دیسک
+func (s *Server) handleRangesLoad(w http.ResponseWriter, r *http.Request) {
+	s.state.mu.RLock()
+	ranges := s.state.SavedRanges
+	s.state.mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ranges": ranges,
 	})
 }
