@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -1348,13 +1346,16 @@ func (s *Server) handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	scanJSON := s.state.SavedScanConfig
 	_ = scanJSON
 	rawURL2 := s.state.SavedRawURL
+	_ = rawURL2
 	templates2 := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates2, s.state.Templates)
+	_ = templates2
 	s.state.mu.Unlock()
 
 	// سیو روی دیسک
 	heCopyForSave2 := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave2[k] = &cp }
+	_ = heCopyForSave2
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
