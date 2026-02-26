@@ -134,20 +134,25 @@ func TestDownloadSpeed(ctx context.Context, socksPort int, downloadURL string, t
 		return 0, err
 	}
 
-	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 
+	// زمان رو بعد از دریافت headers شروع کن — فقط body transfer time
+	bodyStart := time.Now()
 	n, err := io.Copy(io.Discard, resp.Body)
 	if err != nil && ctx.Err() == nil {
 		return 0, err
 	}
-	elapsed := time.Since(start).Seconds()
+	elapsed := time.Since(bodyStart).Seconds()
 	if elapsed <= 0 || n == 0 {
 		return 0, fmt.Errorf("no data received")
+	}
+	// حداقل 0.5 ثانیه اطلاعات لازمه تا نتیجه معنادار باشه
+	if elapsed < 0.5 && n < 100000 {
+		return 0, fmt.Errorf("download too fast or too small to measure")
 	}
 	return float64(n) / elapsed, nil
 }
