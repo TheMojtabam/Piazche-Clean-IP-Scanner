@@ -257,15 +257,24 @@ func (s *Server) handleConfigParse(w http.ResponseWriter, r *http.Request) {
 		s.state.SavedRawURL = input
 		rawURL := input
 		proxyJSON := s.state.SavedProxyConfig
+		_ = proxyJSON
 		scanJSON := s.state.SavedScanConfig
+		_ = rawURL
+		_ = proxyJSON
+		_ = scanJSON
 		templates := make([]config.ConfigTemplate, len(s.state.Templates))
 		copy(templates, s.state.Templates)
+		_ = templates
 		s.state.mu.Unlock()
 		heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 		for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
+		_ = heCopyForSave
 		healthEnabled := s.state.HealthEnabled
 		healthIntervalMins := s.state.HealthIntervalMins
 		trafficDetect := s.state.TrafficDetectEnabled
+		_ = healthEnabled
+		_ = healthIntervalMins
+		_ = trafficDetect
 		go s.saveStateToDiskNow()
 	}
 
@@ -317,6 +326,7 @@ func (s *Server) handleBuildLink(w http.ResponseWriter, r *http.Request) {
 
 	s.state.mu.RLock()
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
 	s.state.mu.RUnlock()
 
 	if rawURL == "" {
@@ -440,6 +450,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	s.state.mu.RLock()
 	results := s.state.Phase2Results
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
 	s.state.mu.RUnlock()
 
 	format := r.URL.Query().Get("format")
@@ -1047,18 +1058,28 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		s.state.SavedScanConfig = req.ScanConfig
 	}
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
+	_ = proxyJSON
+	_ = scanJSON
 	templates := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates, s.state.Templates)
+	_ = templates
 	s.state.mu.Unlock()
 
 	// Persist to disk so config survives restarts
 	heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
+	_ = heCopyForSave
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
+	_ = healthEnabled
+	_ = healthIntervalMins
+	_ = trafficDetect
 	go s.saveStateToDiskNow()
 
 	jsonOK(w, "saved")
@@ -1106,7 +1127,9 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 
 	s.state.mu.RLock()
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	s.state.mu.RUnlock()
 
 	// ۱. proxy config از لینک parse شده
@@ -1276,18 +1299,26 @@ func (s *Server) handleTemplateSave(w http.ResponseWriter, r *http.Request) {
 	s.state.mu.Lock()
 	s.state.Templates = append(s.state.Templates, tmpl)
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
 	templates := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates, s.state.Templates)
+	_ = templates
 	s.state.mu.Unlock()
 
 	// سیو روی دیسک
 	heCopyForSave := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopyForSave[k] = &cp }
+	_ = heCopyForSave
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
+	_ = healthEnabled
+	_ = healthIntervalMins
+	_ = trafficDetect
 	go s.saveStateToDiskNow()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1313,7 +1344,9 @@ func (s *Server) handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.state.Templates = out
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	rawURL2 := s.state.SavedRawURL
 	templates2 := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates2, s.state.Templates)
@@ -1325,6 +1358,9 @@ func (s *Server) handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
+	_ = healthEnabled
+	_ = healthIntervalMins
+	_ = trafficDetect
 	go s.saveStateToDiskNow()
 
 	jsonOK(w, "deleted")
@@ -1387,10 +1423,14 @@ func (s *Server) handleHealthAdd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
 	templates := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates, s.state.Templates)
+	_ = templates
 	heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 	s.state.mu.Unlock()
@@ -1398,6 +1438,9 @@ func (s *Server) handleHealthAdd(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
+	_ = healthEnabled
+	_ = healthIntervalMins
+	_ = trafficDetect
 	go s.saveStateToDiskNow()
 
 	// Health monitor goroutine شروع کن (اگه قبلاً نبوده)
@@ -1437,16 +1480,23 @@ func (s *Server) handleHealthRemove(w http.ResponseWriter, r *http.Request) {
 	s.state.mu.Lock()
 	delete(s.state.HealthEntries, req.IP)
 	proxyJSON := s.state.SavedProxyConfig
+	_ = proxyJSON
 	scanJSON := s.state.SavedScanConfig
+	_ = scanJSON
 	rawURL := s.state.SavedRawURL
+	_ = rawURL
 	templates := make([]config.ConfigTemplate, len(s.state.Templates))
 	copy(templates, s.state.Templates)
+	_ = templates
 	heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 	for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 	s.state.mu.Unlock()
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
+	_ = healthEnabled
+	_ = healthIntervalMins
+	_ = trafficDetect
 	go s.saveStateToDiskNow()
 	jsonOK(w, "removed")
 }
@@ -1887,15 +1937,21 @@ func (s *Server) handleFragmentAuto(w http.ResponseWriter, r *http.Request) {
 			b, _ := json.Marshal(saved)
 			s.state.SavedScanConfig = string(b)
 			proxyJSON := s.state.SavedProxyConfig
+			_ = proxyJSON
 			rawURL := s.state.SavedRawURL
+			_ = rawURL
 			templates := make([]config.ConfigTemplate, len(s.state.Templates))
 			copy(templates, s.state.Templates)
+			_ = templates
 			heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
 			for k, v := range s.state.HealthEntries { cp := *v; heCopy[k] = &cp }
 			s.state.mu.Unlock()
 			healthEnabled := s.state.HealthEnabled
 			healthIntervalMins := s.state.HealthIntervalMins
 			trafficDetect := s.state.TrafficDetectEnabled
+			_ = healthEnabled
+			_ = healthIntervalMins
+			_ = trafficDetect
 			go s.saveStateToDiskNow()
 
 			payload["applied"] = true
