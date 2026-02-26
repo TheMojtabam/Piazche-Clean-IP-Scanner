@@ -26,6 +26,7 @@ type persistedState struct {
 	HealthIntervalMins   *int                           `json:"healthIntervalMins,omitempty"`
 	TrafficDetectEnabled *bool                          `json:"trafficDetect,omitempty"`
 	Sessions             []ScanSession                  `json:"sessions,omitempty"`
+	SavedRanges          string                         `json:"savedRanges,omitempty"`
 }
 
 // configPersistPath returns the path for UI config.
@@ -46,7 +47,7 @@ func configPersistPath() string {
 	return filepath.Join(dir, "ui.json")
 }
 
-func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession) {
+func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession, savedRanges string) {
 	// HealthEntries رو deep copy کن قبل از persist
 	heCopy := make(map[string]*config.HealthEntry, len(healthEntries))
 	for k, v := range healthEntries {
@@ -63,6 +64,7 @@ func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.Conf
 		HealthIntervalMins:   &healthIntervalMins,
 		TrafficDetectEnabled: &trafficDetect,
 		Sessions:             sessions,
+		SavedRanges:          savedRanges,
 	}, "", "  ")
 	os.WriteFile(configPersistPath(), data, 0644)
 }
@@ -85,20 +87,21 @@ func (s *Server) saveStateToDiskNow() {
 	}
 	sessions := make([]ScanSession, len(s.state.Sessions))
 	copy(sessions, s.state.Sessions)
+	savedRanges := s.state.SavedRanges
 	s.state.mu.RUnlock()
-	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions)
+	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions, savedRanges)
 }
 
-func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession) {
+func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession, savedRanges string) {
 	data, err := os.ReadFile(configPersistPath())
 	if err != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil
+		return "", "", "", nil, nil, nil, nil, nil, nil, ""
 	}
 	var ps persistedState
 	if json.Unmarshal(data, &ps) != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil
+		return "", "", "", nil, nil, nil, nil, nil, nil, ""
 	}
-	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions
+	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions, ps.SavedRanges
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -141,6 +144,7 @@ type AppState struct {
 	SavedProxyConfig string
 	SavedScanConfig  string
 	SavedRawURL      string // لینک اصلی (vless:// vmess:// trojan://) برای copy-with-IP
+	SavedRanges      string // IP ranges ذخیره شده
 
 	// config templates
 	Templates []config.ConfigTemplate
@@ -194,7 +198,7 @@ type ScanSession struct {
 // NewServer یه server جدید می‌سازه
 func NewServer(port int) *Server {
 	// Load persisted UI config from disk
-	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions := loadStateFromDisk()
+	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions, savedRanges := loadStateFromDisk()
 
 	if savedTemplates == nil {
 		savedTemplates = []config.ConfigTemplate{}
@@ -226,6 +230,7 @@ func NewServer(port int) *Server {
 		SavedProxyConfig:     proxyJSON,
 		SavedScanConfig:      scanJSON,
 		SavedRawURL:          rawURL,
+		SavedRanges:          savedRanges,
 		Templates:            savedTemplates,
 		HealthEntries:        savedHealthEntries,
 		healthStop:           make(chan struct{}),
@@ -438,23 +443,37 @@ const indexHTMLContent = `<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 html{height:100%}
 
-/* ══ UI MODE TOGGLE ══ */
-.ui-mode-toggle{display:flex;align-items:center;gap:4px;background:var(--bg2);border:1px solid var(--bd2);border-radius:var(--rad);padding:3px;margin-right:6px;}
-.ui-mode-btn{padding:3px 10px;border-radius:calc(var(--rad) - 2px);border:none;background:transparent;color:var(--dim);font-family:var(--font-head);font-size:11px;cursor:pointer;transition:.2s;}
-.ui-mode-btn.active{background:var(--c);color:var(--bg);font-weight:700;}
-.ui-mode-btn:hover:not(.active){color:var(--tx);background:var(--cd);}
+/* ══ CONTEXT MENU ══ */
+.ctx-item{padding:6px 12px;border-radius:4px;color:var(--tx2);cursor:pointer;font-family:var(--font-mono);font-size:11px;}
+.ctx-item:hover{background:var(--bg3);color:var(--tx);}
 
-/* compact mode hides non-essential elements */
-body.compact-mode .card-hd .card-hd-extra,
-body.compact-mode .phd p,
-body.compact-mode .nav-group{display:none!important;}
-body.compact-mode .sidebar{width:52px;}
-body.compact-mode .nav-item .nav-icon{margin-right:0;}
-body.compact-mode .nav-item span:not(.nav-icon):not(.nav-badge){display:none;}
-body.compact-mode .main{margin-left:52px;}
-body.compact-mode .nav-item{justify-content:center;padding:8px 0;}
-body.compact-mode .tui-body{height:calc(100vh - 170px);}
-body.compact-mode .live-feed-body{height:110px;}
+/* ══ PRESET BUTTONS ══ */
+.preset-btn{background:var(--bg3);border:2px solid var(--bd2);border-radius:8px;padding:10px;text-align:center;cursor:pointer;transition:all .15s;}
+.preset-btn:hover{border-color:var(--c);background:var(--cd);}
+.preset-btn-active{border-color:var(--c);background:var(--cd);}
+
+/* ══ HEATMAP ══ */
+.heatmap-row{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;margin-top:4px;}
+.heat-cell{height:10px;border-radius:2px;cursor:default;}
+
+/* ══ TOAST ══ */
+.toast{background:var(--bg2);border:1px solid var(--bd2);border-radius:8px;padding:10px 16px;font-size:12px;font-family:var(--font-mono);display:flex;align-items:center;gap:8px;min-width:220px;max-width:340px;box-shadow:0 4px 20px rgba(0,0,0,.5);pointer-events:all;animation:toastIn .2s ease;}
+.toast-ok{border-color:var(--g);color:var(--g);}
+.toast-err{border-color:var(--r);color:var(--r);}
+.toast-warn{border-color:var(--y);color:var(--y);}
+.toast-info{border-color:var(--c);color:var(--c);}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+/* ══ MULTI-SELECT ══ */
+.p2-row.selected{background:var(--cd)!important;}
+#bulkBar{display:none;position:sticky;bottom:0;background:var(--bg2);border-top:1px solid var(--c);padding:8px 16px;display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px;z-index:10;}
+
+/* ══ RANGE SAVE FEEDBACK ══ */
+#btnSaveRanges.saved{border-color:var(--g);color:var(--g);background:var(--gd);}
+
+/* ══ WS STATUS ══ */
+#wsStatus.connected #wsDot{background:var(--g);}
+#wsStatus.disconnected #wsDot{background:var(--r);}
 body{font-family:var(--font-head);background:var(--bg);color:var(--tx);height:100%;font-size:15px;line-height:1.6;overflow:hidden;transition:background .3s,color .3s}
 .app{display:grid;grid-template-columns:200px 1fr;grid-template-rows:56px 1fr;height:100vh}
 
@@ -786,11 +805,22 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
     <span>⬡</span><span id="proxyChipTxt"></span>
   </div>
   <div class="tb-right">
-    <span id="tbProgress" style="font-family:var(--font-mono);font-size:11px;color:var(--dim)"></span>
-    <div class="ui-mode-toggle" title="Switch UI mode">
-      <button class="ui-mode-btn active" id="uiModeFull" onclick="setUIMode('full')">Full</button>
-      <button class="ui-mode-btn" id="uiModeCompact" onclick="setUIMode('compact')">Compact</button>
+    <!-- WS status -->
+    <div id="wsStatus" style="display:flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:10px;color:var(--dim)" title="WebSocket connection">
+      <div id="wsDot" style="width:6px;height:6px;border-radius:50%;background:var(--dim)"></div>
+      <span id="wsTxt">WS</span>
     </div>
+    <!-- Topbar scan stats -->
+    <div id="tbScanStats" style="display:none;font-family:var(--font-mono);font-size:10px;gap:6px;align-items:center">
+      <span id="tbScanned" style="color:var(--c)"></span>
+      <span style="color:var(--dim)">·</span>
+      <span id="tbPassed" style="color:var(--g)"></span>
+      <span style="color:var(--dim)">·</span>
+      <span id="tbRate" style="color:var(--dim)"></span>
+    </div>
+    <span id="tbProgress" style="font-family:var(--font-mono);font-size:11px;color:var(--dim)"></span>
+    <!-- Day/Night toggle -->
+    <button id="dayNightBtn" onclick="toggleDayNight()" style="background:var(--bg2);border:1px solid var(--bd2);border-radius:6px;padding:4px 9px;font-size:13px;cursor:pointer;color:var(--tx2)" title="Toggle day/night">🌙</button>
     <button class="theme-btn" onclick="openThemePicker()" id="themeBtn" title="Change theme">
       <span class="theme-icon" id="themeIcon">🌙</span>
       <span id="themeTxt">NEON</span>
@@ -815,6 +845,7 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   <button class="nav-item" data-page="monitor" onclick="nav('monitor',this);loadHealth();loadMonitorSettings()">
     <span class="nav-icon">♡</span>Monitor
     <span class="nav-badge" id="nbMonitor" style="display:none">0</span>
+    <span class="nav-badge" id="nbMonitorDown" style="display:none;background:var(--r);color:#000"></span>
   </button>
   <button class="nav-item" data-page="history" onclick="nav('history',this)">
     <span class="nav-icon">◷</span>History
@@ -849,7 +880,7 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
     <div class="phd-l"><h2>Scan</h2><p id="configSummary" style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">No config — import a proxy link first</p></div>
     <div class="phd-r">
       <button class="btn btn-success-real" id="btnStart" onclick="startScan()">▶ Start</button>
-      <button class="btn btn-danger-real" id="btnStop" onclick="stopScan()" style="display:none">■ Stop</button>
+      <button class="btn btn-danger-real" id="btnStop" onclick="stopScanWithConfirm()" style="display:none">■ Stop</button>
     </div>
   </div>
 
@@ -889,9 +920,28 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
     <div class="prog-bd">
       <div class="prog-meta">
         <span id="progTxt" style="font-family:var(--font-mono)">0 / 0</span>
-        <span class="prog-pct" id="progPct">0%</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <svg id="rateSpark" width="60" height="16" style="opacity:.7"></svg>
+          <span id="progRate2" style="font-family:var(--font-mono);font-size:10px;color:var(--c)"></span>
+          <span class="prog-pct" id="progPct">0%</span>
+        </div>
       </div>
-      <div class="prog-wrap"><div class="prog-bar" id="progBar"></div></div>
+      <!-- Phase split progress -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px">
+        <div>
+          <div style="font-family:var(--font-mono);font-size:8px;color:var(--dim);margin-bottom:2px;letter-spacing:1px">P1</div>
+          <div class="prog-wrap"><div class="prog-bar" id="progBarP1" style="background:var(--c)"></div></div>
+        </div>
+        <div>
+          <div style="font-family:var(--font-mono);font-size:8px;color:var(--dim);margin-bottom:2px;letter-spacing:1px">P2</div>
+          <div class="prog-wrap"><div class="prog-bar" id="progBarP2" style="background:var(--g)"></div></div>
+        </div>
+        <div>
+          <div style="font-family:var(--font-mono);font-size:8px;color:var(--dim);margin-bottom:2px;letter-spacing:1px">P3</div>
+          <div class="prog-wrap"><div class="prog-bar" id="progBarP3" style="background:var(--p)"></div></div>
+        </div>
+      </div>
+      <div class="prog-wrap" style="display:none"><div class="prog-bar" id="progBar"></div></div>
       <!-- Quick settings -->
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:4px">
         <div><label>Threads</label><input type="number" id="qThreads" value="200" min="1" style="font-size:11px;padding:4px 7px"></div>
@@ -906,12 +956,18 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   <!-- IP Input + Feed -->
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <div class="card">
-      <div class="card-hd"><div>IP Ranges</div><span id="feedCount" style="color:var(--dim)"></span></div>
+      <div class="card-hd">
+        <div>IP Ranges</div>
+        <span id="ipCountInfo" style="color:var(--c);font-family:var(--font-mono);font-size:10px"></span>
+        <span id="feedCount" style="color:var(--dim)"></span>
+      </div>
       <div class="card-bd" style="padding:10px">
-        <textarea id="ipInput" rows="7" placeholder="104.16.0.0/12&#10;162.158.0.0/15&#10;Or single IPs..."></textarea>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+        <textarea id="ipInput" rows="7" placeholder="104.16.0.0/12&#10;162.158.0.0/15&#10;Or single IPs..." oninput="onIPRangeInput()"></textarea>
+        <div id="rangeWarning" style="display:none;background:rgba(255,215,0,.08);border:1px solid rgba(255,215,0,.2);border-radius:5px;padding:5px 10px;font-size:10px;color:var(--y);font-family:var(--font-mono);margin-top:4px"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:6px">
           <span style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">CIDR or plain IPs</span>
-          <input type="number" id="maxIPInput" placeholder="Max IPs (0=all)" style="width:140px;font-size:11px;padding:3px 7px">
+          <input type="number" id="maxIPInput" placeholder="Max IPs (0=all)" style="width:120px;font-size:11px;padding:3px 7px">
+          <button class="btn btn-sm" onclick="saveRanges()" id="btnSaveRanges" title="Save ranges to disk">⬡ Save</button>
         </div>
         <!-- Quick Range Selector -->
         <div style="margin-top:8px">
@@ -940,14 +996,34 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   <div class="phd">
     <div class="phd-l"><h2>Results</h2><p id="resSummary" style="font-family:var(--font-mono);font-size:10px">No results yet</p></div>
     <div class="phd-r">
-      <button class="btn btn-sm" onclick="exportResults('txt')">↓ IPs</button>
-      <button class="btn btn-sm" onclick="exportResults('links')">↓ Links</button>
-      <button class="btn btn-sm" onclick="exportResults('clash')">↓ Clash</button>
-      <button class="btn btn-sm" onclick="exportResults('singbox')">↓ Sing-box</button>
-      <button class="btn btn-sm" onclick="exportResults('json')">↓ JSON</button>
+      <div style="position:relative;display:inline-block">
+        <button class="btn btn-sm" onclick="toggleExportMenu()" id="btnExport">↓ Export ▾</button>
+        <div id="exportMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;background:var(--bg2);border:1px solid var(--bd2);border-radius:8px;padding:4px;min-width:170px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+          <div style="font-family:var(--font-mono);font-size:9px;color:var(--dim);padding:4px 10px;letter-spacing:1px">FORMAT</div>
+          <div class="ctx-item" onclick="exportResults('txt');toggleExportMenu()">IPs (.txt)</div>
+          <div class="ctx-item" onclick="exportResults('links');toggleExportMenu()">Links</div>
+          <div class="ctx-item" onclick="exportResults('clash');toggleExportMenu()">Clash</div>
+          <div class="ctx-item" onclick="exportResults('singbox');toggleExportMenu()">Sing-box</div>
+          <div class="ctx-item" onclick="exportResults('json');toggleExportMenu()">JSON</div>
+          <div style="height:1px;background:var(--bd);margin:3px 6px"></div>
+          <div style="font-family:var(--font-mono);font-size:9px;color:var(--dim);padding:4px 10px;letter-spacing:1px">FILTER</div>
+          <div class="ctx-item" onclick="exportResults('txt','all');toggleExportMenu()">همه نتایج</div>
+          <div class="ctx-item" onclick="exportResults('txt','pass');toggleExportMenu()">فقط PASS</div>
+          <div class="ctx-item" onclick="exportResults('txt','top10');toggleExportMenu()">Top 10 Score</div>
+        </div>
+      </div>
       <button class="btn btn-sm" onclick="copyAllPassed()">⎘ Copy All</button>
       <button class="btn btn-sm btn-primary-real" id="btnP3" onclick="runPhase3()">🚀 Speed Test (Phase 3)</button>
     </div>
+  </div>
+
+  <!-- Bulk Action Bar (10) -->
+  <div id="bulkBar" style="display:none;background:var(--bg2);border:1px solid var(--c);border-radius:8px;padding:8px 16px;margin-bottom:8px;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px">
+    <span id="bulkCount" style="color:var(--c)"></span>
+    <button class="btn btn-sm" onclick="bulkCopy()">⎘ Copy</button>
+    <button class="btn btn-sm" onclick="bulkSpeedTest()">🚀 Speed Test</button>
+    <button class="btn btn-sm" onclick="bulkMonitor()">♡ Monitor</button>
+    <button class="btn btn-sm" style="margin-right:auto" onclick="selectedIPs.clear();updateBulkBar();document.querySelectorAll('.p2-row.selected').forEach(r=>r.classList.remove('selected'))">✕ Clear</button>
   </div>
 
   <!-- IP Chips -->
@@ -991,7 +1067,7 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
     <div class="tbl-wrap">
       <table class="tbl">
         <thead><tr>
-          <th>#</th><th>IP Address</th><th>Score</th><th>Latency</th><th>Jitter</th><th>Pkt Loss</th><th>Download</th><th>Upload</th><th>Status</th><th>Actions</th>
+          <th><input type="checkbox" id="selectAllP2" onchange="toggleSelectAllP2(this.checked)" style="accent-color:var(--c)" title="انتخاب همه"></th><th>#</th><th>IP Address</th><th>Score</th><th>Latency</th><th>Jitter</th><th>Pkt Loss</th><th>Download</th><th>Upload</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody id="p2Tbody"><tr><td colspan="10" style="text-align:center;color:var(--dim);padding:32px;font-family:var(--font-mono)">No Phase 2 results yet</td></tr></tbody>
       </table>
@@ -1029,19 +1105,48 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
 <!-- ══ CONFIG PAGE ══ -->
 <div id="page-config" class="page">
   <div class="phd">
-    <div class="phd-l"><h2>Settings</h2><p>Saved automatically to disk on save</p></div>
+    <div class="phd-l">
+      <h2>Settings <span id="unsavedDot" style="display:none;font-size:11px;background:rgba(255,136,0,.15);border:1px solid #ff8800;color:#ff8800;border-radius:20px;padding:1px 8px;font-family:var(--font-mono)">● unsaved</span></h2>
+      <p>Saved to disk on save</p>
+    </div>
     <div class="phd-r">
-      <button class="btn btn-success-real" onclick="saveConfig()">⬡ Save Settings</button>
+      <button class="btn btn-sm" onclick="exportConfig()" title="Export settings as JSON">↓ Export</button>
+      <label class="btn btn-sm" style="cursor:pointer" title="Import settings from JSON">↑ Import<input type="file" accept=".json" style="display:none" onchange="importConfig(event)"></label>
+      <button class="btn btn-success-real" onclick="saveConfig()" id="btnSaveConfig">⬡ Save Settings</button>
+    </div>
+  </div>
+
+  <!-- Scan Presets -->
+  <div class="card" style="margin-bottom:0">
+    <div class="card-hd"><div>⚡ Scan Presets</div><span style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">یه کلیک تنظیمات آماده</span></div>
+    <div class="card-bd" style="padding:10px">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+        <div class="preset-btn" onclick="applyPreset('fast')" title="فقط Phase 1 — سریع‌ترین حالت">
+          <div style="font-size:18px">⚡</div>
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--c);font-weight:700">سریع</div>
+          <div style="font-size:10px;color:var(--dim)">P1 only · 500 threads</div>
+        </div>
+        <div class="preset-btn preset-btn-active" onclick="applyPreset('balanced')" title="Phase 1+2 — متوازن" id="presetBalanced">
+          <div style="font-size:18px">◎</div>
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--c);font-weight:700">متوازن</div>
+          <div style="font-size:10px;color:var(--dim)">P1+P2 · 200 threads</div>
+        </div>
+        <div class="preset-btn" onclick="applyPreset('full')" title="Phase 1+2+3 — کامل‌ترین">
+          <div style="font-size:18px">🎯</div>
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--p);font-weight:700">کامل</div>
+          <div style="font-size:10px;color:var(--dim)">P1+P2+P3 · دقیق</div>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="card">
-    <div class="card-hd"><div>⚡ PHASE 1 — Initial Scan</div></div>
+    <div class="card-hd"><div>⚡ PHASE 1 — Initial Scan</div><button onclick="resetSection('phase1')" style="background:none;border:1px solid var(--bd2);border-radius:4px;color:var(--dim);font-family:var(--font-mono);font-size:9px;padding:2px 7px;cursor:pointer" title="برگشت به پیش‌فرض">↺ reset</button></div>
     <div class="card-bd">
       <div class="f-grid-3">
-        <div class="f-row"><label>Threads</label><input type="number" id="cfgThreads" value="200" min="1"></div>
+        <div class="f-row"><label>Threads <span title="تعداد threadهای موازی. بالاتر=سریع‌تر ولی CPU بیشتر" style="cursor:help;color:var(--dim);font-size:10px">?</span></label><input type="number" id="cfgThreads" value="200" min="1"></div>
         <div class="f-row"><label>Timeout (seconds)</label><input type="number" id="cfgTimeout" value="8" min="1"></div>
-        <div class="f-row"><label>Max Latency (ms)</label><input type="number" id="cfgMaxLat" value="3500"></div>
+        <div class="f-row"><label>Max Latency (ms) <span title="IPهایی که latency بیشتر از این داشته باشن fail میشن" style="cursor:help;color:var(--dim);font-size:10px">?</span></label><input type="number" id="cfgMaxLat" value="3500"></div>
         <div class="f-row"><label>Retries</label><input type="number" id="cfgRetries" value="2" min="0"></div>
         <div class="f-row"><label>Max IPs (0 = all)</label><input type="number" id="cfgMaxIPs" value="0" min="0"></div>
         <div class="f-row"><label>Sample per Subnet</label><input type="number" id="cfgSampleSize" value="1" min="1"></div>
@@ -1052,7 +1157,7 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   </div>
 
   <div class="card">
-    <div class="card-hd"><div>◈ PHASE 2 — Deep Stability Test</div></div>
+    <div class="card-hd"><div>◈ PHASE 2 — Deep Stability Test</div><button onclick="resetSection('phase2')" style="background:none;border:1px solid var(--bd2);border-radius:4px;color:var(--dim);font-family:var(--font-mono);font-size:9px;padding:2px 7px;cursor:pointer" title="برگشت به پیش‌فرض">↺ reset</button></div>
     <div class="card-bd">
       <div class="f-grid-3">
         <div class="f-row"><label>Rounds (0 = disabled)</label><input type="number" id="cfgRounds" value="3" min="0"></div>
@@ -1078,10 +1183,11 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
         <div></div>
       </div>
       <label class="chk-row"><input type="checkbox" id="cfgP3Upload"> تست آپلود هم بزن</label>
-      <div style="margin-top:10px;font-size:10px;color:var(--dim)">
-        سرور: <span style="color:var(--c);font-family:var(--font-mono)">speed.cloudflare.com</span>
-        &nbsp;·&nbsp; Phase 3 از نتایج Phase 2 خودکار اجرا میشه یا می‌تونی از دکمه Results دستی اجرا کنی
+      <div class="f-grid" style="margin-top:10px">
+        <div class="f-row"><label>Download URL</label><input type="text" id="cfgDLURL" value="https://speed.cloudflare.com/__down?bytes=5000000"></div>
+        <div class="f-row"><label>Upload URL</label><input type="text" id="cfgULURL" value="https://speed.cloudflare.com/__up"></div>
       </div>
+      <div style="margin-top:10px;font-size:10px;color:var(--dim)">Phase 3 از نتایج Phase 2 خودکار اجرا میشه یا می‌تونی از دکمه Results دستی اجرا کنی</div>
     </div>
   </div>
 
@@ -1224,6 +1330,11 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
         </div>
         <label class="chk-row"><input type="checkbox" id="monitorTrafficDetect" onchange="saveMonitorSettings()"> Traffic Detect</label>
         <label class="chk-row"><input type="checkbox" id="monitorShowGraph" checked onchange="renderHealthList()"> نمایش Graph</label>
+        <select id="monitorSort" onchange="renderHealthList()" style="font-size:11px;padding:3px 6px;font-family:var(--font-mono)">
+          <option value="status">مرتب‌سازی: وضعیت</option>
+          <option value="latency">مرتب‌سازی: latency</option>
+          <option value="uptime">مرتب‌سازی: uptime</option>
+        </select>
       </div>
     </div>
   </div>
@@ -1314,6 +1425,20 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
 </div><!-- /app -->
 
 <!-- ══ THEME PICKER MODAL ══ -->
+<!-- Context Menu -->
+<div id="ctxMenu" style="display:none;position:fixed;z-index:9999;background:var(--bg2);border:1px solid var(--bd2);border-radius:8px;padding:4px;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+  <div class="ctx-item" onclick="ctxAction('copyip')">⎘ Copy IP</div>
+  <div class="ctx-item" onclick="ctxAction('copylink')">🔗 Copy Link</div>
+  <div class="ctx-item" onclick="ctxAction('addmonitor')">♡ Add to Monitor</div>
+  <div style="height:1px;background:var(--bd);margin:3px 6px"></div>
+  <div class="ctx-item" onclick="ctxAction('speedtest')">🚀 Speed Test این IP</div>
+  <div style="height:1px;background:var(--bd);margin:3px 6px"></div>
+  <div class="ctx-item" style="color:var(--r)" onclick="ctxAction('remove')">✕ حذف از نتایج</div>
+</div>
+
+<!-- Toast Container -->
+<div id="toastContainer" style="position:fixed;bottom:20px;right:20px;z-index:10001;display:flex;flex-direction:column;gap:8px;pointer-events:none"></div>
+
 <div class="theme-picker-overlay" id="themePickerOverlay" onclick="closeThemePickerOutside(event)">
   <div class="theme-picker">
     <div class="tp-title">
@@ -1369,7 +1494,7 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
 
 <script>
 // ══ STATE ══
-let ws=null,p1Results=[],p2Results=[],shodanIPs=[],tuiAS=true,viewingSession=false;
+let ws=null,p1Results=[],p2Results=[],shodanIPs=[],tuiAS=true,viewingSession=false,activeTemplateId=null;
 let feedRows=[],maxFeedRows=100,currentTab='p2';
 // localStorage key for history
 const LS_HISTORY='pyz_history_v2';
@@ -1469,8 +1594,10 @@ function switchTab(tab,btn){
 function connectWS(){
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(proto+'://'+location.host+'/ws');
+  ws.onopen=()=>updateWSStatus(true);
   ws.onmessage=e=>{try{handleWS(JSON.parse(e.data));}catch(err){}};
-  ws.onclose=()=>setTimeout(connectWS,2000);
+  ws.onclose=()=>{updateWSStatus(false);setTimeout(connectWS,2000);};
+  ws.onerror=()=>updateWSStatus(false);
 }
 
 function handleWS(msg){
@@ -1504,11 +1631,14 @@ function handleWS(msg){
       break;
     case 'scan_done':
       setStatus('done','');
+      updatePhaseProgressBars('done',100);
+      setTimeout(()=>updateTopbarStats(0,0,0,0),5000);
       addFeedRow('✓ Scan complete — '+payload.passed+' passed','ok');
+      showToast('✓ Scan تموم شد — '+payload.passed+' IP passed','ok',5000);
       if(!viewingSession){refreshResults();}
       saveSessionToHistory(payload);
       refreshHistory();
-      setTimeout(syncHistoryToServer, 1500); // sync to server after results fetched
+      setTimeout(syncHistoryToServer, 1500);
       break;
     case 'health_update':
       handleHealthUpdate(payload);
@@ -1517,6 +1647,7 @@ function handleWS(msg){
       handleHealthError(payload);
       break;
     case 'phase3_start':
+      updatePhaseProgressBars('phase3',0);
       addFeedRow('🚀 Phase 3 (Speed Test) شروع شد — '+payload.count+' IP','p2');
       break;
     case 'phase3_progress':
@@ -1626,6 +1757,9 @@ function setStatus(st,phase){
 
 // ══ PROGRESS ══
 function onProgress(p){
+  updatePhaseProgressBars('phase1',p.pct||0);
+  updateTopbarStats(p.done||0,p.total||0,p.passed||0,p.rate||0);
+  if(p.rate>0) pushRateSpark(p.rate);
   // Update charts
   const pct=p.total>0?Math.round(p.done/p.total*100):0;
   document.getElementById('progBar').style.width=pct+'%';
@@ -1716,8 +1850,9 @@ function updatePassedChips(){
     const grade=scoreToGrade(r.StabilityScore||0);
     const gc=gradeColor(grade);
     const dl=r.DownloadMbps>0?' ↓'+r.DownloadMbps.toFixed(1):'';
-    return '<div class="ip-chip" data-ip="'+r.IP+'" data-action="copyvless" title="Copy vless link">'+
-      '<span style="color:'+gc+';font-family:var(--font-mono);font-weight:700;font-size:9px;margin-right:4px">'+grade+'</span>'+
+    const chipStyle=scoreToChipStyle(r.StabilityScore||0);
+    return '<div class="ip-chip" data-ip="'+r.IP+'" data-action="copyvless" title="Score: '+Math.round(r.StabilityScore||0)+' — Click to copy link" style="'+chipStyle+'">'+
+      '<span style="font-family:var(--font-mono);font-weight:700;font-size:9px;margin-right:4px">'+grade+'</span>'+
       r.IP+'<span class="lat">'+Math.round(r.AvgLatencyMs)+'ms'+dl+'</span></div>';
   }).join('');
   // event delegation
@@ -1918,6 +2053,12 @@ function clearHistory(){
 }
 
 // ══ CONFIG ══
+// Track unsaved changes on settings inputs
+document.querySelectorAll('#page-config input,#page-config select').forEach(el=>{
+  el.addEventListener('change',markUnsaved);
+  el.addEventListener('input',markUnsaved);
+});
+
 function onFragModeChange(val){
   const isAuto=val==='auto';
   const isOff=val==='off';
@@ -1995,6 +2136,9 @@ function saveConfig(){
   fetch('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scanConfig:JSON.stringify(scanCfg)})}).then(()=>{
     appendTUI({t:now(),l:'ok',m:'✓ Settings saved to disk'});
     updateConfigSummary(scanCfg.scan,scanCfg.fragment);
+    flashSaveButton();
+    markSaved();
+    showToast('Settings روی دیسک ذخیره شد','ok');
     nav('scan');
   });
 }
@@ -2136,6 +2280,7 @@ function loadSavedSettings(){
     fetch('/api/tui/stream').then(r=>r.json()).then(data=>{
       if(data.lines) data.lines.forEach(l=>{try{appendTUI(JSON.parse(l));}catch(e){}});
     }).catch(()=>{});
+    loadSavedRanges(d);
   });
   // Load history badge
   const hist=loadHistory();
@@ -2203,6 +2348,9 @@ function addRange(cidr){
 
 // ══ PHASE 2 PROGRESS FIX ══
 function onPhase2Progress(r){
+  const pct=r.pct||Math.round((r.done||0)/(r.total||1)*100);
+  updatePhaseProgressBars('phase2',pct);
+  updateTopbarStats(r.done||0,r.total||0,r.passed||0,r.rate||0);
   const done=r.done||0,total=r.total||1;
   const pct=r.pct||Math.round(done/total*100);
   document.getElementById('progBar').style.width=pct+'%';
@@ -2252,16 +2400,26 @@ function renderTemplates(){
     return;
   }
   templates.forEach(t=>{
+    const lastScan=t.lastScan?'آخرین اسکن: '+new Date(t.lastScan).toLocaleString()+' · '+(t.lastPassCount||0)+' IP پیدا شد':'هنوز اسکن نشده';
+    const isActive=t.id===activeTemplateId;
     const div=document.createElement('div');
     div.className='card';
-    div.style.cssText='padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px';
-    div.innerHTML='<div style="min-width:0"><div style="font-weight:600;font-size:13px;color:var(--tx)">'+t.name+'</div>'+
-      '<div style="font-family:var(--font-mono);font-size:9px;color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(t.rawUrl||'').substring(0,60)+'…</div></div>'+
+    div.style.cssText='padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px'+(isActive?';border-color:var(--g)':'');
+    div.innerHTML='<div style="min-width:0">'+
+      '<div style="display:flex;align-items:center;gap:6px">'+
+        '<div style="font-weight:600;font-size:13px;color:var(--tx)">'+t.name+'</div>'+
+        (isActive?'<span style="font-size:9px;background:var(--gd);border:1px solid var(--g);color:var(--g);border-radius:3px;padding:1px 6px;font-family:var(--font-mono)">active</span>':'')+
+      '</div>'+
+      '<div style="font-family:var(--font-mono);font-size:9px;color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(t.rawUrl||'').substring(0,60)+'…</div>'+
+      '<div style="font-family:var(--font-mono);font-size:9px;color:var(--dim);margin-top:2px">'+lastScan+'</div>'+
+    '</div>'+
       '<div style="display:flex;gap:6px;flex-shrink:0">'+
         '<button class="btn btn-sm" data-id="'+t.id+'" data-action="use">▶ Use</button>'+
+        '<button class="btn btn-sm" data-id="'+t.id+'" data-action="dup" title="Duplicate">⎘</button>'+
         '<button class="btn btn-sm" style="color:var(--r);border-color:var(--r)" data-id="'+t.id+'" data-action="del">✕</button>'+
       '</div>';
     div.querySelector('[data-action="use"]').onclick=function(){useTemplate(this.dataset.id)};
+    div.querySelector('[data-action="dup"]').onclick=function(){duplicateTemplate(this.dataset.id)};
     div.querySelector('[data-action="del"]').onclick=function(){deleteTemplate(this.dataset.id)};
     el.appendChild(div);
   });
@@ -2278,9 +2436,11 @@ async function saveTemplate(){
 function useTemplate(id){
   const t=templates.find(x=>x.id===id);
   if(!t) return;
+  activeTemplateId=id;
   document.getElementById('linkInput').value=t.rawUrl;
   parseLink();
   nav('import');
+  showToast('Template "'+t.name+'" اعمال شد','ok');
 }
 async function deleteTemplate(id){
   await fetch('/api/templates/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
@@ -2347,8 +2507,10 @@ function renderHealthList(){
   const showGraph=document.getElementById('monitorShowGraph')?.checked!==false;
   const nb=document.getElementById('nbMonitor');
   if(nb){nb.style.display='';nb.textContent=entries.filter(e=>e.status==='alive'||e.status==='recovered').length;}
+  updateMonitorDownBadge();
 
-  entries.forEach(e=>{
+  const sortedEntries=getSortedHealth(entries);
+  sortedEntries.forEach(e=>{
     const sc=e.status||'unknown';
     const col=sc==='alive'?'var(--g)':sc==='recovered'?'var(--y)':sc==='dead'?'var(--r)':'var(--dim)';
     const icon=sc==='alive'?'●':sc==='recovered'?'◑':sc==='dead'?'○':'?';
@@ -2386,6 +2548,7 @@ function renderHealthList(){
         '</div>'+
       '</div>'+
       (spark?'<div class="health-graph" style="flex-shrink:0">'+spark+'</div>':'')+
+      (showGraph&&e.latencyHistory&&e.latencyHistory.length?'<div style="flex-shrink:0;width:100%;">'+makeHeatmap(e.latencyHistory)+'</div>':'')+
       '<button class="copy-btn" style="color:var(--r)" data-ip="'+e.ip+'" title="Remove">✕</button>';
     div.querySelector('.copy-btn').onclick=function(){removeFromMonitor(this.dataset.ip)};
     el.appendChild(div);
@@ -2444,6 +2607,10 @@ function handleHealthUpdate(payload){
   } else {
     loadHealth();
   }
+  if(payload.status==='dead'&&cached&&cached._prevStatus&&cached._prevStatus!=='dead'){
+    showToast('⚠ '+ip+' DOWN شد','err',5000);
+  }
+  if(cached) cached._prevStatus=payload.status;
   if(payload.error) appendTUI({t:now(),l:'warn',m:'Health ['+ip+']: '+payload.error});
 }
 function handleHealthError(payload){
@@ -2619,8 +2786,8 @@ function toggleP3Settings(on){
 async function runPhase3(){
   const passed=(p2Results||[]).filter(r=>r.Passed);
   if(!passed.length){appendTUI({t:now(),l:'warn',m:'No passed IPs for Phase 3'});return;}
-  const dlUrl='https://speed.cloudflare.com/__down?bytes=5000000';
-  const ulUrl='https://speed.cloudflare.com/__up';
+  const dlUrl=document.getElementById('cfgDLURL').value||'https://speed.cloudflare.com/__down?bytes=5000000';
+  const ulUrl=document.getElementById('cfgULURL').value||'https://speed.cloudflare.com/__up';
   const testUpload=document.getElementById('cfgP3Upload').checked;
   const ips=passed.map(r=>r.IP);
   const btn=document.getElementById('btnP3');
@@ -2633,27 +2800,6 @@ async function runPhase3(){
   if(btn){btn.disabled=false;btn.textContent='🚀 Speed Test (Phase 3)';}
 }
 
-
-// ══ UI MODE ══
-function setUIMode(mode){
-  const body=document.body;
-  const btnFull=document.getElementById('uiModeFull');
-  const btnCompact=document.getElementById('uiModeCompact');
-  if(mode==='compact'){
-    body.classList.add('compact-mode');
-    btnCompact.classList.add('active');
-    btnFull.classList.remove('active');
-  } else {
-    body.classList.remove('compact-mode');
-    btnFull.classList.add('active');
-    btnCompact.classList.remove('active');
-  }
-  localStorage.setItem('uiMode', mode);
-}
-function initUIMode(){
-  const saved=localStorage.getItem('uiMode')||'full';
-  setUIMode(saved);
-}
 // ══ MONITOR SETTINGS ══
 async function saveMonitorSettings(){
   const enabled=document.getElementById('monitorEnabled').checked;
@@ -2777,10 +2923,12 @@ function renderP2WithData(results){
     const dlc=dl<=0?'var(--dim)':dl>=5?'var(--g)':dl>=1?'var(--y)':'var(--r)';
     const pl=r.PacketLossPct||0;const plc=pl<=5?'var(--g)':pl<=20?'var(--y)':'var(--r)';
     const jt=r.JitterMs||0;const jc=jt<=20?'var(--g)':jt<=80?'var(--y)':'var(--r)';
-    return '<tr class="'+(r.Passed?'pass-row':'fail-row')+'">'+
+    const chk='<input type="checkbox" style="accent-color:var(--c)" '+(selectedIPs.has(r.IP)?'checked':'')+' onchange="toggleIPSelect(\''+r.IP+'\',this.closest(\'.p2-row\'))">'
+    return '<tr class="p2-row '+(r.Passed?'pass-row':'fail-row')+(selectedIPs.has(r.IP)?' selected':'')+'" data-ip="'+r.IP+'">'+
+      '<td>'+chk+'</td>'+
       '<td style="color:var(--dim);font-size:10px">'+(i+1)+'</td>'+
-      '<td style="color:var(--c);font-weight:700;font-size:12px;font-family:var(--font-mono)">'+r.IP+'</td>'+
-      '<td style="color:'+scc+';font-weight:700;font-size:14px;font-family:var(--font-mono)">'+sc.toFixed(0)+'</td>'+
+      '<td style="color:var(--c);font-weight:700;font-size:12px;font-family:var(--font-mono)" onmouseenter="fetchGeoIPTooltip(\''+r.IP+'\',this)" onmouseleave="document.getElementById(\'geoTooltip\')||null;var t=document.getElementById(\'geoTooltip\');if(t)t.style.display=\'none\'">'+r.IP+'</td>'+
+      '<td style="color:'+scc+';font-weight:700;font-size:14px;font-family:var(--font-mono)" title="Score: '+sc.toFixed(0)+'">'+sc.toFixed(0)+'</td>'+
       '<td style="color:'+lc+';font-family:var(--font-mono)">'+Math.round(r.AvgLatencyMs||0)+'ms</td>'+
       '<td style="color:'+jc+';font-family:var(--font-mono)">'+(jt>0?jt.toFixed(0)+'ms':'—')+'</td>'+
       '<td style="color:'+plc+';font-family:var(--font-mono)">'+pl.toFixed(0)+'%</td>'+
@@ -2836,8 +2984,457 @@ function syncHistoryToServer(){
   fetch('/api/sessions/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:history})}).catch(()=>{});
 }
 
+
+// ══ TOAST SYSTEM (36) ══
+function showToast(msg, type='info', duration=3000){
+  const c=document.getElementById('toastContainer');
+  if(!c) return;
+  const t=document.createElement('div');
+  t.className='toast toast-'+type;
+  const icon=type==='ok'?'✓':type==='err'?'✕':type==='warn'?'⚠':'●';
+  t.innerHTML='<span>'+icon+'</span><span>'+msg+'</span>';
+  c.appendChild(t);
+  setTimeout(()=>{t.style.opacity='0';t.style.transform='translateX(20px)';t.style.transition='all .3s';setTimeout(()=>t.remove(),300);},duration);
+}
+
+// ══ WS STATUS (38) ══
+function updateWSStatus(connected){
+  const el=document.getElementById('wsStatus');
+  const txt=document.getElementById('wsTxt');
+  if(!el) return;
+  el.className=connected?'connected':'disconnected';
+  if(txt) txt.textContent=connected?'WS':'WS ✕';
+  const dot=document.getElementById('wsDot');
+  if(dot) dot.style.background=connected?'var(--g)':'var(--r)';
+}
+
+// ══ TOPBAR SCAN STATS (39) ══
+function updateTopbarStats(scanned,total,passed,rate){
+  const bar=document.getElementById('tbScanStats');
+  if(!bar) return;
+  const scanning=scanned>0&&total>0;
+  bar.style.display=scanning?'flex':'none';
+  const sc=document.getElementById('tbScanned');
+  const pa=document.getElementById('tbPassed');
+  const ra=document.getElementById('tbRate');
+  if(sc) sc.textContent=scanned+'/'+total;
+  if(pa) pa.textContent=passed+' passed';
+  if(ra) ra.textContent=rate?rate.toFixed(1)+' IP/s':'';
+}
+
+// ══ DAY/NIGHT TOGGLE (43) ══
+function toggleDayNight(){
+  currentThemeMode=currentThemeMode==='night'?'day':'night';
+  applyTheme();
+  const btn=document.getElementById('dayNightBtn');
+  if(btn) btn.textContent=currentThemeMode==='night'?'🌙':'☀️';
+}
+
+// ══ IP RANGE COUNTER + SAVE (1, 2, 6) ══
+let ipRangeDebounce=null;
+function onIPRangeInput(){
+  clearTimeout(ipRangeDebounce);
+  ipRangeDebounce=setTimeout(()=>{
+    const val=document.getElementById('ipInput').value;
+    const lines=val.split('
+').map(l=>l.trim()).filter(l=>l);
+    let total=0;
+    lines.forEach(l=>{
+      const m=l.match(/\/(\d+)$/);
+      if(m){const bits=parseInt(m[1]);total+=Math.pow(2,32-bits);}
+      else if(l) total+=1;
+    });
+    const el=document.getElementById('ipCountInfo');
+    if(el){
+      if(lines.length>0){
+        const fmt=total>=1000000?(total/1000000).toFixed(1)+'M':total>=1000?(total/1000).toFixed(1)+'K':total;
+        el.textContent=lines.length+' range · ~'+fmt+' IPs';
+      } else { el.textContent=''; }
+    }
+    markUnsaved();
+  },300);
+}
+
+async function saveRanges(){
+  const val=document.getElementById('ipInput').value;
+  const btn=document.getElementById('btnSaveRanges');
+  await fetch('/api/ranges/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ranges:val})});
+  if(btn){btn.textContent='✓ Saved';btn.classList.add('saved');setTimeout(()=>{btn.textContent='⬡ Save';btn.classList.remove('saved');},2000);}
+  showToast('IP ranges ذخیره شد','ok');
+}
+
+function addRange(cidr){
+  const ta=document.getElementById('ipInput');
+  const current=ta.value.trim();
+  // Duplicate check (6)
+  const existing=current.split('
+').map(l=>l.trim());
+  if(existing.includes(cidr.trim())){
+    const w=document.getElementById('rangeWarning');
+    if(w){w.style.display='';w.textContent='⚠ '+cidr+' قبلاً تو لیست هست — اضافه نشد';}
+    setTimeout(()=>{const w=document.getElementById('rangeWarning');if(w)w.style.display='none';},3000);
+    return;
+  }
+  ta.value=current?(current+'
+'+cidr):cidr;
+  onIPRangeInput();
+}
+
+// ══ PHASE PROGRESS BARS (5) ══
+let rateHistory=[];
+function updatePhaseProgressBars(phase, pct){
+  const p1=document.getElementById('progBarP1');
+  const p2=document.getElementById('progBarP2');
+  const p3=document.getElementById('progBarP3');
+  if(phase==='phase1'){if(p1)p1.style.width=pct+'%';if(p2)p2.style.width='0%';if(p3)p3.style.width='0%';}
+  else if(phase==='phase2'){if(p1)p1.style.width='100%';if(p2)p2.style.width=pct+'%';if(p3)p3.style.width='0%';}
+  else if(phase==='phase3'){if(p1)p1.style.width='100%';if(p2)p2.style.width='100%';if(p3)p3.style.width=pct+'%';}
+  else if(phase==='done'){if(p1)p1.style.width='100%';if(p2)p2.style.width='100%';}
+}
+
+// Rate sparkline (3)
+function pushRateSpark(rate){
+  rateHistory.push(rate||0);
+  if(rateHistory.length>20) rateHistory.shift();
+  const svg=document.getElementById('rateSpark');
+  const r2=document.getElementById('progRate2');
+  if(r2&&rate>0) r2.textContent=(rate||0).toFixed(0)+' IP/s';
+  if(!svg) return;
+  const W=60,H=16;
+  const max=Math.max(...rateHistory,1);
+  const bars=rateHistory.map((v,i)=>{
+    const x=Math.round(i/(rateHistory.length-1)*(W-4))+2;
+    const h=Math.max(2,Math.round((v/max)*(H-4)));
+    return '<rect x="'+(x-1)+'" y="'+(H-h)+'" width="2" height="'+h+'" fill="var(--c)" rx="1" opacity="0.7"/>';
+  });
+  svg.innerHTML=bars.join('');
+}
+
+// ══ CONTEXT MENU (8) ══
+let ctxIP=null;
+document.addEventListener('contextmenu',function(e){
+  const row=e.target.closest('.pass-row,.fail-row');
+  if(!row) return;
+  e.preventDefault();
+  ctxIP=row.querySelector('td:nth-child(2)');
+  ctxIP=ctxIP?ctxIP.textContent.trim():null;
+  if(!ctxIP) return;
+  const m=document.getElementById('ctxMenu');
+  if(!m) return;
+  m.style.display='block';
+  m.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
+  m.style.top=Math.min(e.clientY,window.innerHeight-220)+'px';
+});
+document.addEventListener('click',function(){
+  const m=document.getElementById('ctxMenu');
+  if(m) m.style.display='none';
+});
+function ctxAction(action){
+  const m=document.getElementById('ctxMenu');
+  if(m) m.style.display='none';
+  if(!ctxIP) return;
+  if(action==='copyip') copyIP(ctxIP);
+  else if(action==='copylink') copyWithIP(ctxIP);
+  else if(action==='addmonitor') addToMonitor(ctxIP);
+  else if(action==='speedtest') runPhase3Single(ctxIP);
+  else if(action==='remove'){
+    p2Results=p2Results.filter(r=>r.IP!==ctxIP);
+    renderP2();updatePassedChips();
+    showToast(ctxIP+' از نتایج حذف شد','warn');
+  }
+}
+async function runPhase3Single(ip){
+  const btn=document.getElementById('btnP3');
+  if(btn){btn.disabled=true;}
+  await fetch('/api/phase3/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips:[ip],downloadUrl:'https://speed.cloudflare.com/__down?bytes=5000000',uploadUrl:'https://speed.cloudflare.com/__up',testUpload:false})});
+  showToast('🚀 Speed Test شروع شد برای '+ip,'info');
+  if(btn){btn.disabled=false;}
+}
+
+// ══ IP CHIP COLOR SCORE (7) ══
+function scoreToChipStyle(score){
+  if(score>=80) return'background:var(--gd);border:1px solid var(--g);color:var(--g)';
+  if(score>=50) return'background:rgba(255,215,0,.08);border:1px solid var(--y);color:var(--y)';
+  return'background:var(--rd);border:1px solid var(--r);color:var(--r)';
+}
+
+// ══ MULTI-SELECT (10) ══
+let selectedIPs=new Set();
+function toggleIPSelect(ip,row){
+  if(selectedIPs.has(ip)){selectedIPs.delete(ip);row.classList.remove('selected');}
+  else{selectedIPs.add(ip);row.classList.add('selected');}
+  updateBulkBar();
+}
+function updateBulkBar(){
+  const bar=document.getElementById('bulkBar');
+  if(!bar) return;
+  if(selectedIPs.size===0){bar.style.display='none';return;}
+  bar.style.display='flex';
+  const cnt=bar.querySelector('#bulkCount');
+  if(cnt) cnt.textContent=selectedIPs.size+' IP انتخاب شد';
+}
+function bulkCopy(){
+  navigator.clipboard.writeText([...selectedIPs].join('
+'));
+  showToast(selectedIPs.size+' IP کپی شد','ok');
+}
+function bulkMonitor(){
+  [...selectedIPs].forEach(ip=>addToMonitor(ip));
+  showToast(selectedIPs.size+' IP به Monitor اضافه شد','ok');
+  selectedIPs.clear();updateBulkBar();
+}
+function bulkSpeedTest(){
+  if(!selectedIPs.size) return;
+  fetch('/api/phase3/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips:[...selectedIPs],downloadUrl:'https://speed.cloudflare.com/__down?bytes=5000000',uploadUrl:'https://speed.cloudflare.com/__up',testUpload:false})});
+  showToast('🚀 Speed Test شروع شد برای '+selectedIPs.size+' IP','info');
+}
+
+// ══ MONITOR DOWN BADGE (40) ══
+function updateMonitorDownBadge(){
+  const down=healthCache.filter(e=>e.status==='dead').length;
+  const badge=document.getElementById('nbMonitorDown');
+  if(!badge) return;
+  if(down>0){badge.style.display='';badge.textContent=down+' DOWN';}
+  else badge.style.display='none';
+}
+
+// ══ MONITOR SORT (17) ══
+function getSortedHealth(entries){
+  const sort=(document.getElementById('monitorSort')||{}).value||'status';
+  return [...entries].sort((a,b)=>{
+    if(sort==='latency') return (a.latencyMs||9999)-(b.latencyMs||9999);
+    if(sort==='uptime') return (a.uptimePct||0)-(b.uptimePct||0);
+    // status: dead first
+    const order={dead:0,unknown:1,recovered:2,alive:3};
+    return (order[a.status||'unknown']||1)-(order[b.status||'unknown']||1);
+  });
+}
+
+// ══ MONITOR HEATMAP (15) ══
+function makeHeatmap(history){
+  if(!history||!history.length) return '';
+  // Last 24 points
+  const pts=history.slice(-24);
+  const cells=pts.map(v=>{
+    const col=v===0?'var(--r)':v<=200?'var(--g)':v<=400?'var(--y)':'var(--r)';
+    const op=v===0?'0.5':'0.8';
+    const title=v===0?'timeout':v+'ms';
+    return '<div class="heat-cell" style="background:'+col+';opacity:'+op+'" title="'+title+'"></div>';
+  });
+  // Pad to 24
+  while(cells.length<24) cells.unshift('<div class="heat-cell" style="background:var(--bg4)"></div>');
+  return '<div class="heatmap-row">'+cells.join('')+'</div>';
+}
+
+// ══ SAVE BUTTON FEEDBACK (23) ══
+function flashSaveButton(){
+  const btn=document.getElementById('btnSaveConfig');
+  if(!btn) return;
+  const orig=btn.innerHTML;
+  btn.innerHTML='✓ Saved!';
+  btn.style.background='var(--g)';btn.style.borderColor='var(--g)';btn.style.color='#000';
+  setTimeout(()=>{btn.innerHTML=orig;btn.style.background='';btn.style.borderColor='';btn.style.color='';},2000);
+}
+
+// ══ UNSAVED INDICATOR (24) ══
+let _configChanged=false;
+function markUnsaved(){
+  _configChanged=true;
+  const dot=document.getElementById('unsavedDot');
+  if(dot) dot.style.display='';
+}
+function markSaved(){
+  _configChanged=false;
+  const dot=document.getElementById('unsavedDot');
+  if(dot) dot.style.display='none';
+}
+
+// ══ SCAN PRESETS (49) ══
+function applyPreset(p){
+  document.querySelectorAll('.preset-btn').forEach(b=>b.classList.remove('preset-btn-active'));
+  const sv=(id,v)=>{const el=document.getElementById(id);if(el)el.value=v;};
+  const sc=(id,v)=>{const el=document.getElementById(id);if(el)el.checked=v;};
+  if(p==='fast'){
+    sv('cfgThreads',500);sv('cfgTimeout',5);sv('cfgMaxLat',3000);
+    sv('cfgRounds',0);sv('qThreads',500);sv('qTimeout',5);sv('qMaxLat',3000);sv('qRounds',0);
+    sc('cfgP3Enabled',false);
+    showToast('Preset سریع اعمال شد','info');
+  } else if(p==='balanced'){
+    sv('cfgThreads',200);sv('cfgTimeout',8);sv('cfgMaxLat',3500);
+    sv('cfgRounds',3);sv('qThreads',200);sv('qTimeout',8);sv('qMaxLat',3500);sv('qRounds',3);
+    sc('cfgP3Enabled',false);
+    showToast('Preset متوازن اعمال شد','info');
+  } else if(p==='full'){
+    sv('cfgThreads',150);sv('cfgTimeout',10);sv('cfgMaxLat',4000);
+    sv('cfgRounds',5);sv('qThreads',150);sv('qTimeout',10);sv('qMaxLat',4000);sv('qRounds',5);
+    sc('cfgP3Enabled',true);toggleP3Settings(true);
+    showToast('Preset کامل اعمال شد','ok');
+  }
+  markUnsaved();
+}
+
+// ══ CONFIG EXPORT/IMPORT (26) ══
+function exportConfig(){
+  const sc=document.getElementById('cfgScanConfig');
+  const data={
+    scan:{
+      threads:parseInt(document.getElementById('cfgThreads').value)||200,
+      timeout:parseInt(document.getElementById('cfgTimeout').value)||8,
+      maxLatency:parseInt(document.getElementById('cfgMaxLat').value)||3500,
+      retries:parseInt(document.getElementById('cfgRetries').value)||2,
+      maxIPs:parseInt(document.getElementById('cfgMaxIPs').value)||0,
+      stabilityRounds:parseInt(document.getElementById('cfgRounds').value)||3,
+      stabilityInterval:parseInt(document.getElementById('cfgInterval').value)||5,
+    },
+    exportedAt:new Date().toISOString(),
+    version:'1'
+  };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='piyazche_config.json';a.click();
+  showToast('Config export شد','ok');
+}
+function importConfig(e){
+  const file=e.target.files[0];if(!file) return;
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    try{
+      const d=JSON.parse(ev.target.result);
+      const s=d.scan||{};
+      const sv=(id,v)=>{const el=document.getElementById(id);if(el&&v!=null)el.value=v;};
+      if(s.threads){sv('cfgThreads',s.threads);sv('qThreads',s.threads);}
+      if(s.timeout){sv('cfgTimeout',s.timeout);sv('qTimeout',s.timeout);}
+      if(s.maxLatency){sv('cfgMaxLat',s.maxLatency);sv('qMaxLat',s.maxLatency);}
+      if(s.retries) sv('cfgRetries',s.retries);
+      if(s.stabilityRounds){sv('cfgRounds',s.stabilityRounds);sv('qRounds',s.stabilityRounds);}
+      if(s.stabilityInterval) sv('cfgInterval',s.stabilityInterval);
+      showToast('Config import شد','ok');
+      markUnsaved();
+    }catch(err){showToast('فایل معتبر نیست','err');}
+  };
+  reader.readAsText(file);
+}
+
+// ══ EXPORT MENU TOGGLE ══
+function toggleSelectAllP2(checked){
+  const rows=document.querySelectorAll('.p2-row');
+  rows.forEach(row=>{
+    const ip=row.dataset.ip;
+    const cb=row.querySelector('input[type=checkbox]');
+    if(!ip) return;
+    if(checked){selectedIPs.add(ip);row.classList.add('selected');if(cb)cb.checked=true;}
+    else{selectedIPs.delete(ip);row.classList.remove('selected');if(cb)cb.checked=false;}
+  });
+  updateBulkBar();
+}
+
+function toggleExportMenu(){
+  const m=document.getElementById('exportMenu');
+  if(m) m.style.display=m.style.display==='none'?'block':'none';
+}
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#btnExport')&&!e.target.closest('#exportMenu')){
+    const m=document.getElementById('exportMenu');
+    if(m) m.style.display='none';
+  }
+});
+
+// ══ TEMPLATE DUPLICATE (29) ══
+async function duplicateTemplate(id){
+  const t=templates.find(x=>x.id===id);
+  if(!t) return;
+  const name=t.name+' (copy)';
+  await fetch('/api/templates/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,rawUrl:t.rawUrl})});
+  loadTemplates();
+  showToast('"'+name+'" ساخته شد','ok');
+}
+
+// ══ GEO IP (44) — tooltip on IP hover ══
+const geoCache={};
+async function fetchGeoIPTooltip(ip,el){
+  if(geoCache[ip]){showGeoTooltip(ip,geoCache[ip],el);return;}
+  try{
+    const r=await fetch('/api/geoip?ip='+encodeURIComponent(ip));
+    const d=await r.json();
+    geoCache[ip]=d;
+    showGeoTooltip(ip,d,el);
+  }catch(e){}
+}
+function showGeoTooltip(ip,geo,el){
+  let existing=document.getElementById('geoTooltip');
+  if(!existing){existing=document.createElement('div');existing.id='geoTooltip';existing.style.cssText='position:fixed;z-index:9998;background:var(--bg2);border:1px solid var(--bd2);border-radius:8px;padding:10px 14px;font-family:var(--font-mono);font-size:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);pointer-events:none;min-width:180px';document.body.appendChild(existing);}
+  if(!geo||!geo.countryCode){existing.style.display='none';return;}
+  existing.innerHTML='<div style="color:var(--c);margin-bottom:4px">'+ip+'</div>'+
+    '<div style="color:var(--tx2)">🌍 '+geo.country+' ('+geo.countryCode+')</div>'+
+    '<div style="color:var(--dim)">ASN: '+(geo.asn||'—')+'</div>'+
+    '<div style="color:var(--dim)">'+(geo.isp||'')+'</div>';
+  const rect=el.getBoundingClientRect();
+  existing.style.display='block';
+  existing.style.left=Math.min(rect.left,window.innerWidth-200)+'px';
+  existing.style.top=(rect.bottom+4)+'px';
+}
+
+// Pin geo tooltip mouseleave
+document.addEventListener('mouseleave',function(e){
+  if(e.target.classList&&(e.target.classList.contains('p2-row')||e.target.tagName==='TD')){
+    const t=document.getElementById('geoTooltip');
+    if(t) t.style.display='none';
+  }
+},true);
+
+// ══ RESET SECTION (25) ══
+function resetSection(section){
+  const sv=(id,v)=>{const el=document.getElementById(id);if(el)el.value=v;};
+  const sc=(id,v)=>{const el=document.getElementById(id);if(el)el.checked=v;};
+  if(section==='phase1'){sv('cfgThreads',200);sv('cfgTimeout',8);sv('cfgMaxLat',3500);sv('cfgRetries',2);sv('cfgMaxIPs',0);sv('cfgSampleSize',1);sv('cfgTestURL','https://www.gstatic.com/generate_204');sc('cfgShuffle',true);}
+  else if(section==='phase2'){sv('cfgRounds',3);sv('cfgInterval',5);sv('cfgPLCount',5);sv('cfgMaxPL',-1);sc('cfgJitter',false);}
+  else if(section==='fragment'){sv('cfgFragMode','manual');sv('cfgFragPkts','tlshello');sv('cfgFragLen','10-20');sv('cfgFragInt','10-20');}
+  markUnsaved();
+  showToast(section+' به پیش‌فرض برگشت','warn');
+}
+
+// ══ LOAD savedRanges ON INIT ══
+function loadSavedRanges(d){
+  if(d.savedRanges){
+    const ta=document.getElementById('ipInput');
+    if(ta&&!ta.value.trim()) ta.value=d.savedRanges;
+    onIPRangeInput();
+  }
+}
+
+// ══ SCAN ABORT CONFIRM (4) ══
+let _stopConfirmPending=false;
+function stopScanWithConfirm(){
+  if(_stopConfirmPending){stopScan();_stopConfirmPending=false;hideStopConfirm();return;}
+  const done=parseInt(document.getElementById('stDone').textContent)||0;
+  const total=parseInt(document.getElementById('stTotal').textContent)||0;
+  if(total>0){
+    showStopConfirm(done,total);
+  } else {
+    stopScan();
+  }
+}
+function showStopConfirm(done,total){
+  _stopConfirmPending=true;
+  let bar=document.getElementById('stopConfirmBar');
+  if(!bar){
+    bar=document.createElement('div');
+    bar.id='stopConfirmBar';
+    bar.style.cssText='margin-top:8px;background:var(--rd);border:1px solid var(--r);border-radius:6px;padding:8px 12px;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;gap:10px';
+    const progCard=document.querySelector('.prog-card');
+    if(progCard) progCard.appendChild(bar);
+  }
+  bar.innerHTML='<span style="color:var(--r)">■ متوقف میشه — '+done+'/'+total+' اسکن شده</span>'+
+    '<button onclick="stopScan();hideStopConfirm()" style="background:var(--r);border:none;color:#000;font-family:var(--font-mono);font-size:10px;padding:3px 10px;border-radius:4px;cursor:pointer">بله، توقف</button>'+
+    '<button onclick="hideStopConfirm()" style="background:var(--bg3);border:1px solid var(--bd2);color:var(--dim);font-family:var(--font-mono);font-size:10px;padding:3px 10px;border-radius:4px;cursor:pointer">ادامه بده</button>';
+  bar.style.display='flex';
+}
+function hideStopConfirm(){
+  _stopConfirmPending=false;
+  const bar=document.getElementById('stopConfirmBar');
+  if(bar) bar.style.display='none';
+}
+
 // ══ INIT ══
-initUIMode();
 connectWS();
 fetch('/api/status').then(r=>r.json()).then(d=>setStatus(d.status||'idle',d.phase||''));
 loadSavedSettings();
