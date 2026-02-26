@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -31,6 +32,7 @@ type persistedState struct {
 	HealthEnabled        *bool                          `json:"healthEnabled,omitempty"`
 	HealthIntervalMins   *int                           `json:"healthIntervalMins,omitempty"`
 	TrafficDetectEnabled *bool                          `json:"trafficDetect,omitempty"`
+	Sessions             []ScanSession                  `json:"sessions,omitempty"`
 }
 
 // configPersistPath returns the path for UI config.
@@ -51,12 +53,17 @@ func configPersistPath() string {
 	return filepath.Join(dir, "ui.json")
 }
 
-func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool) {
+func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession) {
 	// HealthEntries رو deep copy کن قبل از persist
 	heCopy := make(map[string]*config.HealthEntry, len(healthEntries))
 	for k, v := range healthEntries {
 		cp := *v
 		heCopy[k] = &cp
+	}
+	// Sessions رو محدود کن به ۵۰ تا آخر
+	savedSessions := sessions
+	if len(savedSessions) > 50 {
+		savedSessions = savedSessions[:50]
 	}
 	data, _ := json.MarshalIndent(persistedState{
 		ProxyConfig:          proxyJSON,
@@ -67,6 +74,7 @@ func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.Conf
 		HealthEnabled:        &healthEnabled,
 		HealthIntervalMins:   &healthIntervalMins,
 		TrafficDetectEnabled: &trafficDetect,
+		Sessions:             savedSessions,
 	}, "", "  ")
 	os.WriteFile(configPersistPath(), data, 0644)
 }
@@ -87,20 +95,22 @@ func (s *Server) saveStateToDiskNow() {
 		cp := *v
 		heCopy[k] = &cp
 	}
+	sessions := make([]ScanSession, len(s.state.Sessions))
+	copy(sessions, s.state.Sessions)
 	s.state.mu.RUnlock()
-	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
+	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions)
 }
 
-func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool) {
+func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession) {
 	data, err := os.ReadFile(configPersistPath())
 	if err != nil {
-		return "", "", "", nil, nil, nil, nil, nil
+		return "", "", "", nil, nil, nil, nil, nil, nil
 	}
 	var ps persistedState
 	if json.Unmarshal(data, &ps) != nil {
-		return "", "", "", nil, nil, nil, nil, nil
+		return "", "", "", nil, nil, nil, nil, nil, nil
 	}
-	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled
+	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -196,13 +206,16 @@ type ScanSession struct {
 // NewServer یه server جدید می‌سازه
 func NewServer(port int) *Server {
 	// Load persisted UI config from disk
-	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect := loadStateFromDisk()
+	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions := loadStateFromDisk()
 
 	if savedTemplates == nil {
 		savedTemplates = []config.ConfigTemplate{}
 	}
 	if savedHealthEntries == nil {
 		savedHealthEntries = make(map[string]*config.HealthEntry)
+	}
+	if savedSessions == nil {
+		savedSessions = []ScanSession{}
 	}
 
 	// مقادیر پیش‌فرض monitor — بعد از لود از دیسک override میشن
@@ -221,7 +234,7 @@ func NewServer(port int) *Server {
 
 	state := &AppState{
 		ScanStatus:           "idle",
-		Sessions:             []ScanSession{},
+		Sessions:             savedSessions,
 		SavedProxyConfig:     proxyJSON,
 		SavedScanConfig:      scanJSON,
 		SavedRawURL:          rawURL,
@@ -294,6 +307,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/templates/delete", s.handleTemplateDelete)
 	// Subnet stats
 	mux.HandleFunc("/api/subnets", s.handleSubnets)
+	// Subscription import
+	mux.HandleFunc("/api/subscription/fetch", s.handleSubscriptionFetch)
+	// Sessions persistence
+	mux.HandleFunc("/api/sessions/save", s.handleSessionsSave)
 	// Health monitor
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/health/add", s.handleHealthAdd)
@@ -305,6 +322,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/fragment/auto", s.handleFragmentAuto)
 	// Quick test (live config test)
 	mux.HandleFunc("/api/quicktest", s.handleQuickTest)
+	// System info
+	mux.HandleFunc("/api/sysinfo", s.handleSysInfo)
 }
 
 // --- API Handlers ---
@@ -486,7 +505,7 @@ func (s *Server) handleConfigParse(w http.ResponseWriter, r *http.Request) {
 		healthEnabled := s.state.HealthEnabled
 		healthIntervalMins := s.state.HealthIntervalMins
 		trafficDetect := s.state.TrafficDetectEnabled
-		go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
+		s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
 	}
 
 	cfgJSON, _ := json.MarshalIndent(cfg, "", "  ")
@@ -989,10 +1008,13 @@ func (s *Server) runScan(cfg *config.Config, ipRanges string, maxIPs int) {
 		Results:   s.state.Phase2Results,
 	}
 	s.state.Sessions = append([]ScanSession{session}, s.state.Sessions...)
-	if len(s.state.Sessions) > 20 {
-		s.state.Sessions = s.state.Sessions[:20]
+	if len(s.state.Sessions) > 50 {
+		s.state.Sessions = s.state.Sessions[:50]
 	}
 	s.state.mu.Unlock()
+
+	// Persist sessions to disk so history survives restarts
+	go s.saveStateToDiskNow()
 
 	s.hub.Broadcast("scan_done", map[string]interface{}{
 		"duration": duration.Round(time.Second).String(),
@@ -1276,7 +1298,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
+	s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
 
 	jsonOK(w, "saved")
 }
@@ -1505,7 +1527,7 @@ func (s *Server) handleTemplateSave(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect)
+	s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tmpl)
@@ -1542,7 +1564,7 @@ func (s *Server) handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL2, templates2, heCopyForSave2, healthEnabled, healthIntervalMins, trafficDetect)
+	go s.saveStateToDiskNow()
 
 	jsonOK(w, "deleted")
 }
@@ -1615,7 +1637,7 @@ func (s *Server) handleHealthAdd(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
+	go s.saveStateToDiskNow()
 
 	// Health monitor goroutine شروع کن (اگه قبلاً نبوده)
 	s.startHealthMonitor()
@@ -1664,7 +1686,7 @@ func (s *Server) handleHealthRemove(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
+	go s.saveStateToDiskNow()
 	jsonOK(w, "removed")
 }
 
@@ -2113,7 +2135,7 @@ func (s *Server) handleFragmentAuto(w http.ResponseWriter, r *http.Request) {
 			healthEnabled := s.state.HealthEnabled
 			healthIntervalMins := s.state.HealthIntervalMins
 			trafficDetect := s.state.TrafficDetectEnabled
-			go saveStateToDisk(proxyJSON, string(b), rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect)
+			go s.saveStateToDiskNow()
 
 			payload["applied"] = true
 		} else {
@@ -2182,5 +2204,163 @@ func (s *Server) handleQuickTest(w http.ResponseWriter, r *http.Request) {
 		"success":   result.Success,
 		"latencyMs": result.Latency.Milliseconds(),
 		"error":     fmt.Sprintf("%v", result.Error),
+	})
+}
+
+// ── Subscription Fetch ────────────────────────────────────────────────────────
+
+// handleSubscriptionFetch یه subscription URL رو fetch می‌کنه و لینک‌ها رو برمیگردونه
+func (s *Server) handleSubscriptionFetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
+		jsonError(w, "url required", 400)
+		return
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(req.URL)
+	if err != nil {
+		jsonError(w, "fetch failed: "+err.Error(), 502)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		jsonError(w, fmt.Sprintf("subscription server returned %d", resp.StatusCode), 502)
+		return
+	}
+
+	bodyBytes := make([]byte, 0, 1024*512) // max 512KB
+	buf := make([]byte, 4096)
+	total := 0
+	for total < 512*1024 {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			bodyBytes = append(bodyBytes, buf[:n]...)
+			total += n
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	bodyStr := strings.TrimSpace(string(bodyBytes))
+
+	// Try base64 decode first (standard subscription format)
+	decoded := tryBase64Decode(bodyStr)
+	if decoded != "" {
+		bodyStr = decoded
+	}
+
+	// Parse each line as a proxy link
+	results, errs := ParseMultiProxy(bodyStr)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"results": results,
+		"errors":  errs,
+		"count":   len(results),
+		"raw":     len(bodyStr),
+	})
+}
+
+// tryBase64Decode سعی می‌کنه یه string رو base64 decode کنه
+func tryBase64Decode(s string) string {
+	// Remove whitespace
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, " ", "")
+	if len(s) < 10 {
+		return ""
+	}
+	// Try standard base64 then URL-safe base64
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+		decoded, err := enc.DecodeString(s)
+		if err == nil {
+			result := strings.TrimSpace(string(decoded))
+			if strings.Contains(result, "://") {
+				return result
+			}
+		}
+	}
+	return ""
+}
+
+// ── Sessions Save (client-side history backup) ────────────────────────────────
+
+// handleSessionsSave به client اجازه می‌ده sessions رو روی server ذخیره کنه
+func (s *Server) handleSessionsSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		Sessions []ScanSession `json:"sessions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", 400)
+		return
+	}
+	s.state.mu.Lock()
+	// Merge: server sessions take precedence, client fills gaps
+	serverIDs := map[string]bool{}
+	for _, ss := range s.state.Sessions {
+		serverIDs[ss.ID] = true
+	}
+	for _, cs := range req.Sessions {
+		if !serverIDs[cs.ID] {
+			s.state.Sessions = append(s.state.Sessions, cs)
+		}
+	}
+	if len(s.state.Sessions) > 50 {
+		s.state.Sessions = s.state.Sessions[:50]
+	}
+	s.state.mu.Unlock()
+	go s.saveStateToDiskNow()
+	jsonOK(w, "saved")
+}
+
+// ── System Info ───────────────────────────────────────────────────────────────
+
+var serverStartTime = time.Now()
+
+func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
+	s.state.mu.RLock()
+	threads := 0
+	if s.state.CurrentConfig != nil {
+		threads = s.state.CurrentConfig.Scan.Threads
+	}
+	s.state.mu.RUnlock()
+
+	cfg, _ := s.buildMergedConfig("")
+	if cfg != nil && threads == 0 {
+		threads = cfg.Scan.Threads
+	}
+
+	uptime := time.Since(serverStartTime)
+	uptimeStr := ""
+	h := int(uptime.Hours())
+	m := int(uptime.Minutes()) % 60
+	sec := int(uptime.Seconds()) % 60
+	if h > 0 {
+		uptimeStr = fmt.Sprintf("%dh %dm %ds", h, m, sec)
+	} else if m > 0 {
+		uptimeStr = fmt.Sprintf("%dm %ds", m, sec)
+	} else {
+		uptimeStr = fmt.Sprintf("%ds", sec)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"uptime":      uptimeStr,
+		"threads":     threads,
+		"persistPath": configPersistPath(),
 	})
 }
