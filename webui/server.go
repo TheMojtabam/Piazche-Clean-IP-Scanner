@@ -22,8 +22,22 @@ import (
 // Start شروع HTTP server
 func (s *Server) Start() error {
 	go s.hub.Run()
-	fmt.Printf("  Web UI: http://localhost:%d\n", s.port)
-	return s.srv.ListenAndServe()
+	fmt.Printf("  Web UI (localhost): http://127.0.0.1:%d\n", s.port)
+	// نشون بده روی چه network interface هایی accessible هست
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+				fmt.Printf("  Web UI (network):   http://%s:%d\n", ipNet.IP.String(), s.port)
+			}
+		}
+	}
+	fmt.Printf("  Press Ctrl+C to stop\n\n")
+	err := s.srv.ListenAndServe()
+	if err != nil && err.Error() != "http: Server closed" {
+		fmt.Printf("\n[ERROR] Web server failed: %v\n", err)
+		fmt.Printf("  Try: --ui-port 9091\n")
+	}
+	return err
 }
 
 // Stop خاموش کردن server
@@ -1191,18 +1205,27 @@ func (s *Server) buildMergedConfig(quickOverrideJSON string) (*config.Config, er
 	// ۳. quick override از دکمه شروع (فقط فیلدهایی که صریحاً داده شدن)
 	if quickOverrideJSON != "" {
 		var q struct {
-			Threads         *int     `json:"threads"`
-			Timeout         *int     `json:"timeout"`
-			MaxLatency      *int     `json:"maxLatency"`
-			StabilityRounds *int     `json:"stabilityRounds"`
-			SampleSize      *int     `json:"sampleSize"`
+			Threads         *int  `json:"threads"`
+			Timeout         *int  `json:"timeout"`
+			MaxLatency      *int  `json:"maxLatency"`
+			StabilityRounds *int  `json:"stabilityRounds"`
+			SampleSize      *int  `json:"sampleSize"`
+			JitterTest      *bool `json:"jitterTest"`
+			SpeedTest       *bool `json:"speedTest"`
+			PacketLossCount *int  `json:"packetLossCount"`
 		}
 		if err := json.Unmarshal([]byte(quickOverrideJSON), &q); err == nil {
-			if q.Threads != nil && *q.Threads > 0 { cfg.Scan.Threads = *q.Threads }
-			if q.Timeout != nil && *q.Timeout > 0 { cfg.Scan.Timeout = *q.Timeout }
-			if q.MaxLatency != nil && *q.MaxLatency > 0 { cfg.Scan.MaxLatency = *q.MaxLatency }
-			if q.StabilityRounds != nil { cfg.Scan.StabilityRounds = *q.StabilityRounds }
-			if q.SampleSize != nil && *q.SampleSize > 0 { cfg.Scan.SampleSize = *q.SampleSize }
+			if q.Threads != nil && *q.Threads > 0         { cfg.Scan.Threads = *q.Threads }
+			if q.Timeout != nil && *q.Timeout > 0         { cfg.Scan.Timeout = *q.Timeout }
+			if q.MaxLatency != nil && *q.MaxLatency > 0   { cfg.Scan.MaxLatency = *q.MaxLatency }
+			if q.StabilityRounds != nil                   { cfg.Scan.StabilityRounds = *q.StabilityRounds }
+			if q.SampleSize != nil && *q.SampleSize > 0   { cfg.Scan.SampleSize = *q.SampleSize }
+			if q.JitterTest != nil                        { cfg.Scan.JitterTest = *q.JitterTest }
+			if q.SpeedTest != nil && *q.SpeedTest {
+				cfg.Scan.SpeedTest = true
+				cfg.Scan.BandwidthMode = config.BandwidthSpeedTest
+			}
+			if q.PacketLossCount != nil && *q.PacketLossCount > 0 { cfg.Scan.PacketLossCount = *q.PacketLossCount }
 		}
 	}
 
