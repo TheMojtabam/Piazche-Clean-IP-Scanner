@@ -2053,11 +2053,12 @@ function clearHistory(){
 }
 
 // ══ CONFIG ══
-// Track unsaved changes on settings inputs
-document.querySelectorAll('#page-config input,#page-config select').forEach(el=>{
-  el.addEventListener('change',markUnsaved);
-  el.addEventListener('input',markUnsaved);
-});
+function initUnsavedTracking(){
+  document.querySelectorAll('#page-config input,#page-config select').forEach(el=>{
+    el.addEventListener('change',markUnsaved);
+    el.addEventListener('input',markUnsaved);
+  });
+}
 
 function onFragModeChange(val){
   const isAuto=val==='auto';
@@ -2340,19 +2341,12 @@ function renderQuickRanges(provider){
   });
 }
 
-function addRange(cidr){
-  const ta=document.getElementById('ipInput');
-  const current=ta.value.trim();
-  ta.value=current?(current+'\n'+cidr):cidr;
-}
-
 // ══ PHASE 2 PROGRESS FIX ══
 function onPhase2Progress(r){
-  const pct=r.pct||Math.round((r.done||0)/(r.total||1)*100);
-  updatePhaseProgressBars('phase2',pct);
-  updateTopbarStats(r.done||0,r.total||0,r.passed||0,r.rate||0);
   const done=r.done||0,total=r.total||1;
   const pct=r.pct||Math.round(done/total*100);
+  updatePhaseProgressBars('phase2',pct);
+  updateTopbarStats(done,total,r.passed||0,r.rate||0);
   document.getElementById('progBar').style.width=pct+'%';
   document.getElementById('progPct').textContent=pct+'%';
   document.getElementById('progTxt').textContent=done+' / '+total+' (P2)';
@@ -3036,8 +3030,7 @@ function onIPRangeInput(){
   clearTimeout(ipRangeDebounce);
   ipRangeDebounce=setTimeout(()=>{
     const val=document.getElementById('ipInput').value;
-    const lines=val.split('
-').map(l=>l.trim()).filter(l=>l);
+    const lines=val.split('\n').map(l=>l.trim()).filter(l=>l);
     let total=0;
     lines.forEach(l=>{
       const m=l.match(/\/(\d+)$/);
@@ -3067,16 +3060,14 @@ function addRange(cidr){
   const ta=document.getElementById('ipInput');
   const current=ta.value.trim();
   // Duplicate check (6)
-  const existing=current.split('
-').map(l=>l.trim());
+  const existing=current.split('\n').map(l=>l.trim());
   if(existing.includes(cidr.trim())){
     const w=document.getElementById('rangeWarning');
     if(w){w.style.display='';w.textContent='⚠ '+cidr+' قبلاً تو لیست هست — اضافه نشد';}
     setTimeout(()=>{const w=document.getElementById('rangeWarning');if(w)w.style.display='none';},3000);
     return;
   }
-  ta.value=current?(current+'
-'+cidr):cidr;
+  ta.value=current?(current+'\n'+cidr):cidr;
   onIPRangeInput();
 }
 
@@ -3174,8 +3165,7 @@ function updateBulkBar(){
   if(cnt) cnt.textContent=selectedIPs.size+' IP انتخاب شد';
 }
 function bulkCopy(){
-  navigator.clipboard.writeText([...selectedIPs].join('
-'));
+  navigator.clipboard.writeText([...selectedIPs].join('\n'));
   showToast(selectedIPs.size+' IP کپی شد','ok');
 }
 function bulkMonitor(){
@@ -3436,6 +3426,7 @@ function hideStopConfirm(){
 
 // ══ INIT ══
 connectWS();
+initUnsavedTracking();
 fetch('/api/status').then(r=>r.json()).then(d=>setStatus(d.status||'idle',d.phase||''));
 loadSavedSettings();
 renderQuickRanges('cf');
