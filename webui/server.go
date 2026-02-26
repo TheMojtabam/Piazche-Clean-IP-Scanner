@@ -21,245 +21,6 @@ import (
 	"piyazche/xray"
 )
 
-// ── Disk Persistence ─────────────────────────────────────────────────────────
-
-type persistedState struct {
-	ProxyConfig          string                         `json:"proxyConfig"`
-	ScanConfig           string                         `json:"scanConfig"`
-	Templates            []config.ConfigTemplate        `json:"templates,omitempty"`
-	RawURL               string                         `json:"rawUrl,omitempty"`
-	HealthEntries        map[string]*config.HealthEntry `json:"healthEntries,omitempty"`
-	HealthEnabled        *bool                          `json:"healthEnabled,omitempty"`
-	HealthIntervalMins   *int                           `json:"healthIntervalMins,omitempty"`
-	TrafficDetectEnabled *bool                          `json:"trafficDetect,omitempty"`
-	Sessions             []ScanSession                  `json:"sessions,omitempty"`
-}
-
-// configPersistPath returns the path for UI config.
-// Checks ./piyazche_ui.json first, falls back to ~/.piyazche/ui.json
-func configPersistPath() string {
-	local := "piyazche_ui.json"
-	// Try to create a temp file to check writability
-	if f, err := os.OpenFile(local, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-		f.Close()
-		return local
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return local
-	}
-	dir := filepath.Join(home, ".piyazche")
-	os.MkdirAll(dir, 0755)
-	return filepath.Join(dir, "ui.json")
-}
-
-func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession) {
-	// HealthEntries رو deep copy کن قبل از persist
-	heCopy := make(map[string]*config.HealthEntry, len(healthEntries))
-	for k, v := range healthEntries {
-		cp := *v
-		heCopy[k] = &cp
-	}
-	// Sessions رو محدود کن به ۵۰ تا آخر
-	savedSessions := sessions
-	if len(savedSessions) > 50 {
-		savedSessions = savedSessions[:50]
-	}
-	data, _ := json.MarshalIndent(persistedState{
-		ProxyConfig:          proxyJSON,
-		ScanConfig:           scanJSON,
-		Templates:            templates,
-		RawURL:               rawURL,
-		HealthEntries:        heCopy,
-		HealthEnabled:        &healthEnabled,
-		HealthIntervalMins:   &healthIntervalMins,
-		TrafficDetectEnabled: &trafficDetect,
-		Sessions:             savedSessions,
-	}, "", "  ")
-	os.WriteFile(configPersistPath(), data, 0644)
-}
-
-// saveStateToDiskFromServer — helper که state رو از server می‌خونه و ذخیره میکنه
-func (s *Server) saveStateToDiskNow() {
-	s.state.mu.RLock()
-	proxyJSON := s.state.SavedProxyConfig
-	scanJSON := s.state.SavedScanConfig
-	rawURL := s.state.SavedRawURL
-	templates := make([]config.ConfigTemplate, len(s.state.Templates))
-	copy(templates, s.state.Templates)
-	healthEnabled := s.state.HealthEnabled
-	healthIntervalMins := s.state.HealthIntervalMins
-	trafficDetect := s.state.TrafficDetectEnabled
-	heCopy := make(map[string]*config.HealthEntry, len(s.state.HealthEntries))
-	for k, v := range s.state.HealthEntries {
-		cp := *v
-		heCopy[k] = &cp
-	}
-	sessions := make([]ScanSession, len(s.state.Sessions))
-	copy(sessions, s.state.Sessions)
-	s.state.mu.RUnlock()
-	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions)
-}
-
-func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession) {
-	data, err := os.ReadFile(configPersistPath())
-	if err != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil
-	}
-	var ps persistedState
-	if json.Unmarshal(data, &ps) != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil
-	}
-	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions
-}
-
-// ── Server ────────────────────────────────────────────────────────────────────
-
-// Server — Web UI HTTP server
-type Server struct {
-	port    int
-	state   *AppState
-	hub     *WSHub
-	srv     *http.Server
-	mu      sync.Mutex
-}
-
-// AppState وضعیت کلی app — اینجا همه چیز نگه داشته میشه
-type AppState struct {
-	mu sync.RWMutex
-
-	// scan state
-	ScanStatus   string          // "idle", "scanning", "paused", "done"
-	ScanPhase    string          // "phase1", "phase2"
-	Progress     ScanProgress
-	P2Progress   P2ScanProgress  // وضعیت فاز ۲
-	Results      []scanner.Result
-	Phase2Results []scanner.Phase2Result
-
-	// history
-	Sessions []ScanSession
-
-	// current config
-	CurrentConfig *config.Config
-	ConfigRaw     string
-
-	// scan control
-	cancelFn      context.CancelFunc
-	phase2CancelFn context.CancelFunc // جداگانه برای فاز 2
-	scannerRef    *scanner.Scanner
-	CurrentIP     string
-
-	// saved config
-	SavedProxyConfig string
-	SavedScanConfig  string
-	SavedRawURL      string // لینک اصلی (vless:// vmess:// trojan://) برای copy-with-IP
-
-	// config templates
-	Templates []config.ConfigTemplate
-
-	// subnet intelligence
-	SubnetStats []config.SubnetStat
-
-	// health monitor
-	HealthEntries        map[string]*config.HealthEntry
-	healthStop           chan struct{}
-	healthOnce           sync.Once
-	healthTicker         *time.Ticker
-	HealthIntervalMins   int  // default: 3
-	HealthEnabled        bool // مانیتور فعال/غیرفعال
-	TrafficDetectEnabled bool // تشخیص ترافیک بدون speed test
-
-	// TUI log
-	TUILog []string
-}
-
-// P2ScanProgress پروگرس فاز ۲
-type P2ScanProgress struct {
-	Total     int
-	Done      int
-	Passed    int
-	StartTime time.Time
-	ETA       string
-	Rate      float64
-}
-
-type ScanProgress struct {
-	Total     int
-	Done      int
-	Succeeded int
-	Failed    int
-	Rate      float64 // IPs/sec
-	StartTime time.Time
-	ETA       string
-}
-
-type ScanSession struct {
-	ID        string    `json:"id"`
-	StartedAt time.Time `json:"startedAt"`
-	Duration  string    `json:"duration"`
-	TotalIPs  int       `json:"totalIPs"`
-	Passed    int       `json:"passed"`
-	Config    string    `json:"config"` // config name
-	Results   []scanner.Phase2Result `json:"results"`
-}
-
-// NewServer یه server جدید می‌سازه
-func NewServer(port int) *Server {
-	// Load persisted UI config from disk
-	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions := loadStateFromDisk()
-
-	if savedTemplates == nil {
-		savedTemplates = []config.ConfigTemplate{}
-	}
-	if savedHealthEntries == nil {
-		savedHealthEntries = make(map[string]*config.HealthEntry)
-	}
-	if savedSessions == nil {
-		savedSessions = []ScanSession{}
-	}
-
-	// مقادیر پیش‌فرض monitor — بعد از لود از دیسک override میشن
-	healthEnabled := true
-	healthIntervalMins := 3
-	trafficDetect := false
-	if savedHealthEnabled != nil {
-		healthEnabled = *savedHealthEnabled
-	}
-	if savedHealthInterval != nil && *savedHealthInterval > 0 {
-		healthIntervalMins = *savedHealthInterval
-	}
-	if savedTrafficDetect != nil {
-		trafficDetect = *savedTrafficDetect
-	}
-
-	state := &AppState{
-		ScanStatus:           "idle",
-		Sessions:             savedSessions,
-		SavedProxyConfig:     proxyJSON,
-		SavedScanConfig:      scanJSON,
-		SavedRawURL:          rawURL,
-		Templates:            savedTemplates,
-		HealthEntries:        savedHealthEntries,
-		healthStop:           make(chan struct{}),
-		HealthIntervalMins:   healthIntervalMins,
-		HealthEnabled:        healthEnabled,
-		TrafficDetectEnabled: trafficDetect,
-	}
-
-	hub := NewWSHub()
-
-	mux := http.NewServeMux()
-	s := &Server{port: port, state: state, hub: hub}
-	s.registerRoutes(mux)
-
-	s.srv = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
-	}
-
-	return s
-}
-
 // Start شروع HTTP server
 func (s *Server) Start() error {
 	go s.hub.Run()
@@ -505,7 +266,7 @@ func (s *Server) handleConfigParse(w http.ResponseWriter, r *http.Request) {
 		healthEnabled := s.state.HealthEnabled
 		healthIntervalMins := s.state.HealthIntervalMins
 		trafficDetect := s.state.TrafficDetectEnabled
-		s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
+		go s.saveStateToDiskNow()
 	}
 
 	cfgJSON, _ := json.MarshalIndent(cfg, "", "  ")
@@ -1013,7 +774,7 @@ func (s *Server) runScan(cfg *config.Config, ipRanges string, maxIPs int) {
 	}
 	s.state.mu.Unlock()
 
-	// Persist sessions to disk so history survives restarts
+	// Persist sessions to disk
 	go s.saveStateToDiskNow()
 
 	s.hub.Broadcast("scan_done", map[string]interface{}{
@@ -1298,7 +1059,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
+	go s.saveStateToDiskNow()
 
 	jsonOK(w, "saved")
 }
@@ -1527,7 +1288,7 @@ func (s *Server) handleTemplateSave(w http.ResponseWriter, r *http.Request) {
 	healthEnabled := s.state.HealthEnabled
 	healthIntervalMins := s.state.HealthIntervalMins
 	trafficDetect := s.state.TrafficDetectEnabled
-	s.state.mu.RLock(); _sessions := make([]ScanSession, len(s.state.Sessions)); copy(_sessions, s.state.Sessions); s.state.mu.RUnlock(); go saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopyForSave, healthEnabled, healthIntervalMins, trafficDetect, _sessions)
+	go s.saveStateToDiskNow()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tmpl)
@@ -2209,6 +1970,8 @@ func (s *Server) handleQuickTest(w http.ResponseWriter, r *http.Request) {
 
 // ── Subscription Fetch ────────────────────────────────────────────────────────
 
+var serverStartTime = time.Now()
+
 // handleSubscriptionFetch یه subscription URL رو fetch می‌کنه و لینک‌ها رو برمیگردونه
 func (s *Server) handleSubscriptionFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -2236,7 +1999,7 @@ func (s *Server) handleSubscriptionFetch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	bodyBytes := make([]byte, 0, 1024*512) // max 512KB
+	bodyBytes := make([]byte, 0, 512*1024)
 	buf := make([]byte, 4096)
 	total := 0
 	for total < 512*1024 {
@@ -2251,36 +2014,28 @@ func (s *Server) handleSubscriptionFetch(w http.ResponseWriter, r *http.Request)
 	}
 
 	bodyStr := strings.TrimSpace(string(bodyBytes))
-
-	// Try base64 decode first (standard subscription format)
-	decoded := tryBase64Decode(bodyStr)
-	if decoded != "" {
+	if decoded := tryBase64Decode(bodyStr); decoded != "" {
 		bodyStr = decoded
 	}
 
-	// Parse each line as a proxy link
 	results, errs := ParseMultiProxy(bodyStr)
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":      true,
 		"results": results,
 		"errors":  errs,
 		"count":   len(results),
-		"raw":     len(bodyStr),
 	})
 }
 
 // tryBase64Decode سعی می‌کنه یه string رو base64 decode کنه
 func tryBase64Decode(s string) string {
-	// Remove whitespace
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, " ", "")
 	if len(s) < 10 {
 		return ""
 	}
-	// Try standard base64 then URL-safe base64
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
 		decoded, err := enc.DecodeString(s)
 		if err == nil {
@@ -2293,7 +2048,7 @@ func tryBase64Decode(s string) string {
 	return ""
 }
 
-// ── Sessions Save (client-side history backup) ────────────────────────────────
+// ── Sessions Save ─────────────────────────────────────────────────────────────
 
 // handleSessionsSave به client اجازه می‌ده sessions رو روی server ذخیره کنه
 func (s *Server) handleSessionsSave(w http.ResponseWriter, r *http.Request) {
@@ -2309,7 +2064,6 @@ func (s *Server) handleSessionsSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.state.mu.Lock()
-	// Merge: server sessions take precedence, client fills gaps
 	serverIDs := map[string]bool{}
 	for _, ss := range s.state.Sessions {
 		serverIDs[ss.ID] = true
@@ -2329,26 +2083,17 @@ func (s *Server) handleSessionsSave(w http.ResponseWriter, r *http.Request) {
 
 // ── System Info ───────────────────────────────────────────────────────────────
 
-var serverStartTime = time.Now()
-
 func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
-	s.state.mu.RLock()
-	threads := 0
-	if s.state.CurrentConfig != nil {
-		threads = s.state.CurrentConfig.Scan.Threads
-	}
-	s.state.mu.RUnlock()
-
 	cfg, _ := s.buildMergedConfig("")
-	if cfg != nil && threads == 0 {
+	threads := 0
+	if cfg != nil {
 		threads = cfg.Scan.Threads
 	}
-
 	uptime := time.Since(serverStartTime)
-	uptimeStr := ""
 	h := int(uptime.Hours())
 	m := int(uptime.Minutes()) % 60
 	sec := int(uptime.Seconds()) % 60
+	uptimeStr := ""
 	if h > 0 {
 		uptimeStr = fmt.Sprintf("%dh %dm %ds", h, m, sec)
 	} else if m > 0 {
@@ -2356,7 +2101,6 @@ func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		uptimeStr = fmt.Sprintf("%ds", sec)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"uptime":      uptimeStr,
