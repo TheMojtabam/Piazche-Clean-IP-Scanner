@@ -4,20 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"piyazche/config"
-	"piyazche/optimizer"
 	"piyazche/scanner"
-	"piyazche/shodan"
-	"piyazche/utils"
-	"piyazche/xray"
 )
 
 // ── Disk Persistence ─────────────────────────────────────────────────────────
