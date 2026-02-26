@@ -437,6 +437,24 @@ const indexHTMLContent = `<!DOCTYPE html>
 .tp-mode-icon{font-size:18px;}
 *{margin:0;padding:0;box-sizing:border-box}
 html{height:100%}
+
+/* ══ UI MODE TOGGLE ══ */
+.ui-mode-toggle{display:flex;align-items:center;gap:4px;background:var(--bg2);border:1px solid var(--bd2);border-radius:var(--rad);padding:3px;margin-right:6px;}
+.ui-mode-btn{padding:3px 10px;border-radius:calc(var(--rad) - 2px);border:none;background:transparent;color:var(--dim);font-family:var(--font-head);font-size:11px;cursor:pointer;transition:.2s;}
+.ui-mode-btn.active{background:var(--c);color:var(--bg);font-weight:700;}
+.ui-mode-btn:hover:not(.active){color:var(--tx);background:var(--cd);}
+
+/* compact mode hides non-essential elements */
+body.compact-mode .card-hd .card-hd-extra,
+body.compact-mode .phd p,
+body.compact-mode .nav-group{display:none!important;}
+body.compact-mode .sidebar{width:52px;}
+body.compact-mode .nav-item .nav-icon{margin-right:0;}
+body.compact-mode .nav-item span:not(.nav-icon):not(.nav-badge){display:none;}
+body.compact-mode .main{margin-left:52px;}
+body.compact-mode .nav-item{justify-content:center;padding:8px 0;}
+body.compact-mode .tui-body{height:calc(100vh - 170px);}
+body.compact-mode .live-feed-body{height:110px;}
 body{font-family:var(--font-head);background:var(--bg);color:var(--tx);height:100%;font-size:15px;line-height:1.6;overflow:hidden;transition:background .3s,color .3s}
 .app{display:grid;grid-template-columns:200px 1fr;grid-template-rows:56px 1fr;height:100vh}
 
@@ -769,6 +787,10 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   </div>
   <div class="tb-right">
     <span id="tbProgress" style="font-family:var(--font-mono);font-size:11px;color:var(--dim)"></span>
+    <div class="ui-mode-toggle" title="Switch UI mode">
+      <button class="ui-mode-btn active" id="uiModeFull" onclick="setUIMode('full')">Full</button>
+      <button class="ui-mode-btn" id="uiModeCompact" onclick="setUIMode('compact')">Compact</button>
+    </div>
     <button class="theme-btn" onclick="openThemePicker()" id="themeBtn" title="Change theme">
       <span class="theme-icon" id="themeIcon">🌙</span>
       <span id="themeTxt">NEON</span>
@@ -1056,11 +1078,10 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
         <div></div>
       </div>
       <label class="chk-row"><input type="checkbox" id="cfgP3Upload"> تست آپلود هم بزن</label>
-      <div class="f-grid" style="margin-top:10px">
-        <div class="f-row"><label>Download URL</label><input type="text" id="cfgDLURL" value="https://speed.cloudflare.com/__down?bytes=5000000"></div>
-        <div class="f-row"><label>Upload URL</label><input type="text" id="cfgULURL" value="https://speed.cloudflare.com/__up"></div>
+      <div style="margin-top:10px;font-size:10px;color:var(--dim)">
+        سرور: <span style="color:var(--c);font-family:var(--font-mono)">speed.cloudflare.com</span>
+        &nbsp;·&nbsp; Phase 3 از نتایج Phase 2 خودکار اجرا میشه یا می‌تونی از دکمه Results دستی اجرا کنی
       </div>
-      <div style="margin-top:10px;font-size:10px;color:var(--dim)">Phase 3 از نتایج Phase 2 خودکار اجرا میشه یا می‌تونی از دکمه Results دستی اجرا کنی</div>
     </div>
   </div>
 
@@ -2598,8 +2619,8 @@ function toggleP3Settings(on){
 async function runPhase3(){
   const passed=(p2Results||[]).filter(r=>r.Passed);
   if(!passed.length){appendTUI({t:now(),l:'warn',m:'No passed IPs for Phase 3'});return;}
-  const dlUrl=document.getElementById('cfgDLURL').value||'https://speed.cloudflare.com/__down?bytes=5000000';
-  const ulUrl=document.getElementById('cfgULURL').value||'https://speed.cloudflare.com/__up';
+  const dlUrl='https://speed.cloudflare.com/__down?bytes=5000000';
+  const ulUrl='https://speed.cloudflare.com/__up';
   const testUpload=document.getElementById('cfgP3Upload').checked;
   const ips=passed.map(r=>r.IP);
   const btn=document.getElementById('btnP3');
@@ -2612,6 +2633,27 @@ async function runPhase3(){
   if(btn){btn.disabled=false;btn.textContent='🚀 Speed Test (Phase 3)';}
 }
 
+
+// ══ UI MODE ══
+function setUIMode(mode){
+  const body=document.body;
+  const btnFull=document.getElementById('uiModeFull');
+  const btnCompact=document.getElementById('uiModeCompact');
+  if(mode==='compact'){
+    body.classList.add('compact-mode');
+    btnCompact.classList.add('active');
+    btnFull.classList.remove('active');
+  } else {
+    body.classList.remove('compact-mode');
+    btnFull.classList.add('active');
+    btnCompact.classList.remove('active');
+  }
+  localStorage.setItem('uiMode', mode);
+}
+function initUIMode(){
+  const saved=localStorage.getItem('uiMode')||'full';
+  setUIMode(saved);
+}
 // ══ MONITOR SETTINGS ══
 async function saveMonitorSettings(){
   const enabled=document.getElementById('monitorEnabled').checked;
@@ -2795,6 +2837,7 @@ function syncHistoryToServer(){
 }
 
 // ══ INIT ══
+initUIMode();
 connectWS();
 fetch('/api/status').then(r=>r.json()).then(d=>setStatus(d.status||'idle',d.phase||''));
 loadSavedSettings();
