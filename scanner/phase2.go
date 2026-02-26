@@ -235,6 +235,13 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 	var lossTotal float64
 	roundsDone := 0
 
+	// جیتر حداقل ۳ sample نیاز داره؛ اگه rounds کمتره، latency extra بگیر
+	minLatencySamples := rounds
+	if cfg.Scan.JitterTest && minLatencySamples < 3 {
+		minLatencySamples = 3
+	}
+	extraLatencies := minLatencySamples - rounds
+
 	for round := 0; round < rounds; round++ {
 		select {
 		case <-ctx.Done():
@@ -288,6 +295,29 @@ func testIPPhase2(ctx context.Context, cfg *config.Config, ip string, rounds int
 	}
 
 done:
+	// اگه جیتر نیاز داشت و rounds کم بود، latency extra بگیر
+	for i := 0; i < extraLatencies; i++ {
+		select {
+		case <-ctx.Done():
+			goto skipExtra
+		default:
+		}
+		extraCtx, extraCancel := context.WithTimeout(ctx, connTimeout)
+		result := xray.TestConnectivityWithContext(extraCtx, port, cfg.Scan.TestURL, connTimeout)
+		extraCancel()
+		if result.Success {
+			latencies = append(latencies, result.Latency.Milliseconds())
+		}
+		if i < extraLatencies-1 {
+			select {
+			case <-ctx.Done():
+				goto skipExtra
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}
+skipExtra:
+
 	if len(latencies) == 0 {
 		p2.FailReason = "no successful latency samples"
 		return p2
