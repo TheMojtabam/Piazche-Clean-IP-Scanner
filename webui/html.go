@@ -27,6 +27,7 @@ type persistedState struct {
 	TrafficDetectEnabled *bool                          `json:"trafficDetect,omitempty"`
 	Sessions             []ScanSession                  `json:"sessions,omitempty"`
 	SavedRanges          string                         `json:"savedRanges,omitempty"`
+	SubnetStats          []config.SubnetStat            `json:"subnetStats,omitempty"`
 }
 
 // configPersistPath returns the path for UI config.
@@ -47,7 +48,7 @@ func configPersistPath() string {
 	return filepath.Join(dir, "ui.json")
 }
 
-func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession, savedRanges string) {
+func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled bool, healthIntervalMins int, trafficDetect bool, sessions []ScanSession, savedRanges string, subnetStats []config.SubnetStat) {
 	// HealthEntries رو deep copy کن قبل از persist
 	heCopy := make(map[string]*config.HealthEntry, len(healthEntries))
 	for k, v := range healthEntries {
@@ -65,6 +66,7 @@ func saveStateToDisk(proxyJSON, scanJSON, rawURL string, templates []config.Conf
 		TrafficDetectEnabled: &trafficDetect,
 		Sessions:             sessions,
 		SavedRanges:          savedRanges,
+		SubnetStats:          subnetStats,
 	}, "", "  ")
 	os.WriteFile(configPersistPath(), data, 0644)
 }
@@ -88,20 +90,22 @@ func (s *Server) saveStateToDiskNow() {
 	sessions := make([]ScanSession, len(s.state.Sessions))
 	copy(sessions, s.state.Sessions)
 	savedRanges := s.state.SavedRanges
+	subnetStats := make([]config.SubnetStat, len(s.state.SubnetStats))
+	copy(subnetStats, s.state.SubnetStats)
 	s.state.mu.RUnlock()
-	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions, savedRanges)
+	saveStateToDisk(proxyJSON, scanJSON, rawURL, templates, heCopy, healthEnabled, healthIntervalMins, trafficDetect, sessions, savedRanges, subnetStats)
 }
 
-func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession, savedRanges string) {
+func loadStateFromDisk() (proxyJSON, scanJSON, rawURL string, templates []config.ConfigTemplate, healthEntries map[string]*config.HealthEntry, healthEnabled *bool, healthIntervalMins *int, trafficDetect *bool, sessions []ScanSession, savedRanges string, subnetStats []config.SubnetStat) {
 	data, err := os.ReadFile(configPersistPath())
 	if err != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil, ""
+		return "", "", "", nil, nil, nil, nil, nil, nil, "", nil
 	}
 	var ps persistedState
 	if json.Unmarshal(data, &ps) != nil {
-		return "", "", "", nil, nil, nil, nil, nil, nil, ""
+		return "", "", "", nil, nil, nil, nil, nil, nil, "", nil
 	}
-	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions, ps.SavedRanges
+	return ps.ProxyConfig, ps.ScanConfig, ps.RawURL, ps.Templates, ps.HealthEntries, ps.HealthEnabled, ps.HealthIntervalMins, ps.TrafficDetectEnabled, ps.Sessions, ps.SavedRanges, ps.SubnetStats
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -198,7 +202,7 @@ type ScanSession struct {
 // NewServer یه server جدید می‌سازه
 func NewServer(port int) *Server {
 	// Load persisted UI config from disk
-	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions, savedRanges := loadStateFromDisk()
+	proxyJSON, scanJSON, rawURL, savedTemplates, savedHealthEntries, savedHealthEnabled, savedHealthInterval, savedTrafficDetect, savedSessions, savedRanges, savedSubnetStats := loadStateFromDisk()
 
 	if savedTemplates == nil {
 		savedTemplates = []config.ConfigTemplate{}
@@ -208,6 +212,9 @@ func NewServer(port int) *Server {
 	}
 	if savedSessions == nil {
 		savedSessions = []ScanSession{}
+	}
+	if savedSubnetStats == nil {
+		savedSubnetStats = []config.SubnetStat{}
 	}
 
 	// مقادیر پیش‌فرض monitor — بعد از لود از دیسک override میشن
@@ -237,6 +244,7 @@ func NewServer(port int) *Server {
 		HealthIntervalMins:   healthIntervalMins,
 		HealthEnabled:        healthEnabled,
 		TrafficDetectEnabled: trafficDetect,
+		SubnetStats:          savedSubnetStats,
 	}
 
 	hub := NewWSHub()
@@ -869,6 +877,28 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
   <button class="nav-item" data-page="sysinfo" onclick="nav('sysinfo',this);loadSysInfo()">
     <span class="nav-icon">⬡</span>System
   </button>
+  <div class="nav-group">Analytics</div>
+  <button class="nav-item" data-page="analytics" onclick="nav('analytics',this);loadAnalytics()">
+    <span class="nav-icon">📊</span>Analytics
+  </button>
+  <button class="nav-item" data-page="bandwidth" onclick="nav('bandwidth',this);initBandwidth()">
+    <span class="nav-icon">📡</span>Bandwidth
+  </button>
+  <button class="nav-item" data-page="canary" onclick="nav('canary',this);loadCanary()">
+    <span class="nav-icon">🔦</span>Canary Probe
+  </button>
+  <button class="nav-item" data-page="subnetorg" onclick="nav('subnetorg',this);loadSubnetOrg()">
+    <span class="nav-icon">🗂</span>Subnet Board
+  </button>
+  <button class="nav-item" data-page="scripts" onclick="nav('scripts',this)">
+    <span class="nav-icon">📜</span>Scripts
+  </button>
+  <button class="nav-item" data-page="share" onclick="nav('share',this)">
+    <span class="nav-icon">📷</span>Share
+  </button>
+  <button class="nav-item" data-page="tlstest" onclick="nav('tlstest',this)">
+    <span class="nav-icon">🔬</span>TLS Test
+  </button>
 </div>
 
 <!-- MAIN -->
@@ -1423,6 +1453,246 @@ label{display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;letter-spa
     <div class="tui-body" id="tuiBody">
       <div class="tui-line"><span class="tui-t">--:--:--</span><span class="tui-info">Piyazche ready<span class="cursor"></span></span></div>
     </div>
+  </div>
+</div>
+
+<!-- ══ ANALYTICS PAGE ══ -->
+<div id="page-analytics" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>📊 Analytics</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">تحلیل آماری تاریخچه‌ی scan‌ها</p></div>
+    <div class="phd-r">
+      <div id="analyticsRange" style="display:inline-flex;background:var(--bg3);border:1px solid var(--bd2);border-radius:6px;padding:2px;gap:2px">
+        <button class="btn btn-xs" onclick="setAnalyticsRange(7)" id="ar7" style="background:var(--c);color:#000">7d</button>
+        <button class="btn btn-xs" onclick="setAnalyticsRange(30)" id="ar30">30d</button>
+        <button class="btn btn-xs" onclick="setAnalyticsRange(0)" id="arAll">All</button>
+      </div>
+      <button class="btn btn-sm" onclick="loadAnalytics()">↺ Refresh</button>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px" id="analyticsStats">
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:26px;font-weight:700;color:var(--c)" id="asTotalIPs">—</div><div style="font-size:10px;color:var(--dim);margin-top:3px;letter-spacing:1px">IPs SCANNED</div></div>
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:26px;font-weight:700;color:var(--g)" id="asPassRate">—</div><div style="font-size:10px;color:var(--dim);margin-top:3px;letter-spacing:1px">AVG PASS</div></div>
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:26px;font-weight:700;color:var(--y)" id="asAvgLat">—</div><div style="font-size:10px;color:var(--dim);margin-top:3px;letter-spacing:1px">AVG LATENCY</div></div>
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:26px;font-weight:700;color:var(--p)" id="asSessions">—</div><div style="font-size:10px;color:var(--dim);margin-top:3px;letter-spacing:1px">SESSIONS</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:16px">
+      <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:12px">PASS RATE — PER SESSION</div>
+      <div id="analyticsChart" style="display:flex;align-items:flex-end;gap:6px;height:80px"></div>
+    </div>
+    <div class="card" style="padding:16px">
+      <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:12px">TOP SUBNETS</div>
+      <div id="analyticsSubnets"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ BANDWIDTH PAGE ══ -->
+<div id="page-bandwidth" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>📡 Bandwidth Monitor</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">مصرف real-time شبکه</p></div>
+    <div class="phd-r">
+      <span id="bwStatus" class="nav-badge" style="background:var(--g);color:#000;display:none">● LIVE</span>
+      <button class="btn btn-sm" id="bwToggle" onclick="toggleBandwidth()">▶ Start</button>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:22px;font-weight:700;color:var(--g)" id="bwRx">↓ — MB/s</div><div style="font-size:10px;color:var(--dim);margin-top:3px">DOWNLOAD</div></div>
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:22px;font-weight:700;color:var(--c)" id="bwTx">↑ — MB/s</div><div style="font-size:10px;color:var(--dim);margin-top:3px">UPLOAD</div></div>
+    <div class="card" style="padding:14px;text-align:center"><div style="font-family:var(--font-mono);font-size:22px;font-weight:700;color:var(--y)" id="bwTotal">— GB</div><div style="font-size:10px;color:var(--dim);margin-top:3px">THIS SESSION</div></div>
+  </div>
+  <div class="card" style="padding:16px;margin-bottom:16px">
+    <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:10px">DOWNLOAD — LAST 60s</div>
+    <div id="bwChart" style="display:flex;align-items:flex-end;gap:3px;height:60px"></div>
+  </div>
+  <div class="card" style="padding:16px">
+    <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:10px">QUOTA TRACKER</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+      <span style="font-size:11px;color:var(--tx2);font-family:var(--font-mono)">Monthly quota (GB):</span>
+      <input type="number" id="bwQuota" value="50" min="1" style="width:70px" class="inp" onchange="saveBwQuota()">
+    </div>
+    <div style="height:8px;background:var(--bg4);border-radius:4px;overflow:hidden;margin-bottom:5px">
+      <div id="bwQuotaBar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,var(--g),var(--y));width:0%;transition:width .5s"></div>
+    </div>
+    <div id="bwQuotaLabel" style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">0 GB used</div>
+  </div>
+</div>
+
+<!-- ══ CANARY PROBE PAGE ══ -->
+<div id="page-canary" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>🔦 Canary Probe</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">تشخیص زودهنگام خرابی IP قبل از down شدن</p></div>
+    <div class="phd-r">
+      <button class="btn btn-sm" onclick="loadCanary()">↺ Refresh</button>
+    </div>
+  </div>
+  <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:11px;color:var(--tx2)">
+    💡 Canary Probe مانیتور‌شده‌های فعال رو بررسی میکنه. اگه latency روند صعودی داشته باشه، <strong style="color:var(--y)">زرد</strong> (هشدار). اگه پیوسته بالا بره، <strong style="color:var(--r)">قرمز</strong> (خطر).
+  </div>
+  <div id="canaryList" style="display:flex;flex-direction:column;gap:10px">
+    <div style="color:var(--dim);font-family:var(--font-mono);font-size:12px;padding:20px;text-align:center">در حال بارگذاری...</div>
+  </div>
+</div>
+
+<!-- ══ SUBNET ORGANIZER (KANBAN) PAGE ══ -->
+<div id="page-subnetorg" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>🗂 Subnet Board</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">مدیریت subnet‌ها با دسته‌بندی · Drag &amp; Drop</p></div>
+    <div class="phd-r">
+      <button class="btn btn-sm" onclick="addSubnetGroup()">+ Group</button>
+      <button class="btn btn-sm" onclick="loadSubnetOrg()">↺ Refresh</button>
+    </div>
+  </div>
+  <div id="subnetKanban" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px"></div>
+</div>
+
+<!-- ══ SCRIPTS PAGE ══ -->
+<div id="page-scripts" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>📜 Script Runner</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">اتوماسیون scan با DSL ساده</p></div>
+    <div class="phd-r">
+      <button class="btn btn-sm" onclick="runScript()">▶ Run</button>
+      <button class="btn btn-sm" onclick="saveScript()">💾 Save</button>
+      <button class="btn btn-sm" onclick="loadScriptPresets()">📚 Library</button>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 340px;gap:16px">
+    <div class="card" style="padding:0;overflow:hidden">
+      <div style="background:var(--bg3);border-bottom:1px solid var(--bd);padding:8px 13px;font-family:var(--font-mono);font-size:10px;color:var(--dim);display:flex;align-items:center;gap:8px">
+        <span>● script.pyz</span>
+        <span id="scriptSavedBadge" style="display:none;font-size:9px;color:var(--g)">✓ saved</span>
+      </div>
+      <textarea id="scriptEditor" spellcheck="false" style="width:100%;height:340px;background:var(--bg2);border:none;color:var(--tx);font-family:var(--font-mono);font-size:12px;padding:14px;resize:none;outline:none;line-height:1.75">// Daily best-IP finder
+scan "104.16.0.0/20" threads=300
+filter latency < 250 AND loss < 5%
+sort score desc
+take 10
+monitor add
+export "best_ips.csv"</textarea>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="card" style="padding:14px">
+        <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:9px">OUTPUT</div>
+        <div id="scriptOutput" style="font-family:var(--font-mono);font-size:10px;color:var(--tx2);line-height:1.8;min-height:80px">
+          <span style="color:var(--dim)">Run a script to see output...</span>
+        </div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:9px">PRESETS</div>
+        <div style="display:flex;flex-direction:column;gap:5px" id="scriptPresetList">
+          <button class="btn btn-sm bgh" onclick="loadPreset('daily')" style="text-align:right;justify-content:flex-start">⚡ Daily Best-IP</button>
+          <button class="btn btn-sm bgh" onclick="loadPreset('fastly')" style="text-align:right;justify-content:flex-start">🟡 Fastly Only</button>
+          <button class="btn btn-sm bgh" onclick="loadPreset('gaming')" style="text-align:right;justify-content:flex-start">🎮 Gaming (low ping)</button>
+          <button class="btn btn-sm bgh" onclick="loadPreset('monitor_clean')" style="text-align:right;justify-content:flex-start">♡ Refresh Monitor</button>
+        </div>
+      </div>
+      <div class="card" style="padding:14px">
+        <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:9px">DSL REFERENCE</div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--tx2);line-height:1.9">
+          <span style="color:var(--p)">scan</span> <span style="color:var(--c)">"subnet"</span> [threads=N]<br>
+          <span style="color:var(--p)">filter</span> latency &lt; N AND loss &lt; N%<br>
+          <span style="color:var(--p)">sort</span> score|latency|download [desc]<br>
+          <span style="color:var(--p)">take</span> N<br>
+          <span style="color:var(--p)">monitor</span> add|clear<br>
+          <span style="color:var(--p)">export</span> <span style="color:var(--c)">"filename.csv"</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SHARE PAGE ══ -->
+<div id="page-share" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>📷 Share Results</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">اشتراک‌گذاری نتایج · پنهان کردن IP</p></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:16px">
+      <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:12px">PREVIEW</div>
+      <div id="sharePreview" style="background:var(--bg3);border:1px solid var(--bd);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px;min-height:120px;line-height:1.8">
+        <div style="color:var(--c);margin-bottom:6px">🧅 Piyazche Scan Results</div>
+        <div id="sharePreviewLines" style="color:var(--tx2)">برو به صفحه Results برگرد...</div>
+      </div>
+      <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer">
+          <input type="checkbox" id="shareHideIP" checked style="accent-color:var(--c)">
+          <span style="font-family:var(--font-mono)">پنهان کردن آخرین octet IP (xxx.xxx.xxx.<strong>*</strong>)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer">
+          <input type="checkbox" id="shareTop10" checked style="accent-color:var(--c)">
+          <span style="font-family:var(--font-mono)">فقط top 10 IP</span>
+        </label>
+      </div>
+    </div>
+    <div class="card" style="padding:16px">
+      <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:12px">EXPORT</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn" style="background:var(--c);color:#000;justify-content:center" onclick="shareAsText()">📋 Copy as Text</button>
+        <button class="btn bgh" style="justify-content:center" onclick="shareAsCSV()">📄 Download CSV</button>
+        <button class="btn bgh" style="justify-content:center" onclick="shareAsLink()">🔗 Shareable Link (URL encoded)</button>
+        <button class="btn bgh" style="justify-content:center" onclick="shareAsMarkdown()">📝 Copy as Markdown</button>
+      </div>
+      <div style="margin-top:14px">
+        <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono);letter-spacing:1px;margin-bottom:8px">INCLUDE IN SHARE</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;margin-bottom:5px">
+          <input type="checkbox" id="shareIncludeScore" checked style="accent-color:var(--c)">
+          <span style="font-family:var(--font-mono)">Score</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;margin-bottom:5px">
+          <input type="checkbox" id="shareIncludeLat" checked style="accent-color:var(--c)">
+          <span style="font-family:var(--font-mono)">Latency</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer">
+          <input type="checkbox" id="shareIncludeDL" style="accent-color:var(--c)">
+          <span style="font-family:var(--font-mono)">Download speed</span>
+        </label>
+      </div>
+      <div id="shareCopyFeedback" style="display:none;margin-top:10px;background:var(--gd);border:1px solid rgba(0,255,170,.3);border-radius:6px;padding:7px 11px;font-family:var(--font-mono);font-size:10px;color:var(--g)">✓ Copied!</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ TLS TEST PAGE ══ -->
+<div id="page-tlstest" class="page">
+  <div class="phd">
+    <div class="phd-l"><h2>🔬 TLS Handshake Test</h2><p style="font-family:var(--font-mono);font-size:10px;color:var(--dim)">زمان‌بندی TLS handshake برای هر IP · TCP ms · TLS ms · cipher · cert</p></div>
+  </div>
+  <div class="card" style="padding:16px;margin-bottom:16px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:200px">
+        <label style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">SNI HOST</label>
+        <input class="inp" id="tlsHost" value="speed.cloudflare.com" style="font-family:var(--font-mono)">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;width:80px">
+        <label style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">PORT</label>
+        <input class="inp" id="tlsPort" value="443">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;flex:2;min-width:200px">
+        <label style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">IPs (comma separated یا از results)</label>
+        <input class="inp" id="tlsIPs" placeholder="104.16.0.45, 141.101.65.3 — یا دکمه زیر" style="font-family:var(--font-mono)">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <button class="btn" style="background:var(--c);color:#000" onclick="runTLSTest()">🔬 Run Test</button>
+        <button class="btn bgh btn-sm" onclick="loadTLSIPsFromResults()">↙ از Results</button>
+      </div>
+    </div>
+  </div>
+  <div id="tlsTestStatus" style="display:none;background:var(--cd);border:1px solid rgba(56,191,255,.3);border-radius:7px;padding:9px 13px;margin-bottom:14px;font-family:var(--font-mono);font-size:11px;color:var(--c)">در حال تست...</div>
+  <div id="tlsResults" style="display:none">
+    <table style="width:100%;border-collapse:collapse;font-family:var(--font-mono)" id="tlsTable">
+      <thead>
+        <tr style="border-bottom:1px solid var(--bd)">
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">IP</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">TCP</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">TLS</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">Total</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">Version</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">Cert Expiry</th>
+          <th style="text-align:right;padding:8px;font-size:10px;color:var(--dim);letter-spacing:1px">Status</th>
+        </tr>
+      </thead>
+      <tbody id="tlsTableBody"></tbody>
+    </table>
   </div>
 </div>
 
@@ -3460,6 +3730,562 @@ Promise.race([
   loadTemplates();
   loadMonitorSettings();
 });
+
+// ══════════════════════════════════════════════════════
+// ══ ANALYTICS PAGE ══
+// ══════════════════════════════════════════════════════
+let analyticsRangeDays = 7;
+function setAnalyticsRange(d) {
+  analyticsRangeDays = d;
+  document.querySelectorAll('#analyticsRange .btn').forEach(b => b.style.background = '');
+  document.querySelectorAll('#analyticsRange .btn').forEach(b => { b.style.background=''; b.style.color=''; });
+  const id = d===7?'ar7':d===30?'ar30':'arAll';
+  const el = document.getElementById(id);
+  if(el){ el.style.background='var(--c)'; el.style.color='#000'; }
+  loadAnalytics();
+}
+async function loadAnalytics() {
+  try {
+    const res = await fetch('/api/sessions');
+    const sessions = await res.json();
+    let filtered = sessions;
+    if(analyticsRangeDays > 0) {
+      const cutoff = Date.now() - analyticsRangeDays * 86400000;
+      filtered = sessions.filter(s => new Date(s.startedAt||s.time||0).getTime() > cutoff);
+    }
+    if(!filtered.length) {
+      document.getElementById('asTotalIPs').textContent='0';
+      document.getElementById('asPassRate').textContent='0%';
+      document.getElementById('asAvgLat').textContent='—';
+      document.getElementById('asSessions').textContent='0';
+      document.getElementById('analyticsChart').innerHTML='<span style="color:var(--dim);font-size:11px">No sessions in range</span>';
+      return;
+    }
+    let totalIPs=0, totalPassed=0, totalLat=0, latCount=0;
+    let subnetMap = {};
+    filtered.forEach(s => {
+      totalIPs += (s.totalScanned||s.total||0);
+      totalPassed += (s.passed||0);
+      if(s.avgLatency){ totalLat+=s.avgLatency; latCount++; }
+      // subnets from results
+      (s.results||[]).forEach(r => {
+        if(r.ip){ const parts=r.ip.split('.'); const sub=parts[0]+'.'+parts[1]+'.'+parts[2]+'.0/24';
+          if(!subnetMap[sub]) subnetMap[sub]={total:0,passed:0};
+          subnetMap[sub].total++;
+          if(r.success||r.passed) subnetMap[sub].passed++;
+        }
+      });
+    });
+    document.getElementById('asTotalIPs').textContent = totalIPs.toLocaleString();
+    document.getElementById('asPassRate').textContent = totalIPs>0?Math.round(totalPassed/totalIPs*100)+'%':'0%';
+    document.getElementById('asAvgLat').textContent = latCount>0?Math.round(totalLat/latCount)+'ms':'—';
+    document.getElementById('asSessions').textContent = filtered.length;
+    // chart
+    const chart = document.getElementById('analyticsChart');
+    chart.innerHTML = '';
+    const recent = filtered.slice(-12);
+    const maxPct = Math.max(...recent.map(s=>s.totalScanned>0?s.passed/s.totalScanned*100:0), 1);
+    recent.forEach(s => {
+      const pct = s.totalScanned>0?s.passed/s.totalScanned*100:0;
+      const h = Math.round(pct/maxPct*100);
+      const color = pct>=50?'var(--g)':pct>=25?'var(--y)':'var(--r)';
+      const bar = document.createElement('div');
+      bar.style.cssText = `flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:3px;height:100%`;
+      bar.innerHTML = `<div style="width:100%;background:${color};border-radius:3px 3px 0 0;height:${Math.max(4,h)}%;opacity:.85"></div><div style="font-size:8px;color:var(--dim);font-family:var(--font-mono)">${Math.round(pct)}%</div>`;
+      chart.appendChild(bar);
+    });
+    // top subnets
+    const subnets = document.getElementById('analyticsSubnets');
+    subnets.innerHTML = '';
+    const sorted = Object.entries(subnetMap).filter(([,v])=>v.total>=2).sort(([,a],[,b])=>b.passed/b.total-a.passed/a.total).slice(0,5);
+    if(!sorted.length){ subnets.innerHTML='<span style="color:var(--dim);font-size:11px">Not enough data</span>'; return; }
+    sorted.forEach(([sub,v]) => {
+      const pct = Math.round(v.passed/v.total*100);
+      const color = pct>=50?'var(--g)':pct>=25?'var(--y)':'var(--r)';
+      subnets.innerHTML += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="font-family:var(--font-mono);font-size:10px;color:var(--c);min-width:130px;direction:ltr">${sub}</div><div style="flex:1;height:14px;background:var(--bg4);border-radius:3px;overflow:hidden"><div style="height:100%;background:${color};width:${pct}%"></div></div><div style="font-size:10px;font-family:var(--font-mono);color:${color};min-width:35px">${pct}%</div></div>`;
+    });
+  } catch(e) { console.error('analytics error',e); }
+}
+
+// ══════════════════════════════════════════════════════
+// ══ BANDWIDTH MONITOR ══
+// ══════════════════════════════════════════════════════
+let bwRunning = false;
+let bwTimer = null;
+let bwSamples = [];
+let bwSessionBytes = 0;
+let bwPrevRx = 0, bwPrevTx = 0;
+const BW_HISTORY = 60;
+
+function initBandwidth() {
+  updateBwQuotaDisplay();
+}
+function saveBwQuota() {
+  localStorage.setItem('pyz_bw_quota', document.getElementById('bwQuota').value);
+}
+function updateBwQuotaDisplay() {
+  const quota = parseFloat(localStorage.getItem('pyz_bw_quota')||'50');
+  document.getElementById('bwQuota').value = quota;
+  const used = parseFloat(localStorage.getItem('pyz_bw_used_gb')||'0');
+  const pct = Math.min(100, used/quota*100);
+  document.getElementById('bwQuotaBar').style.width = pct+'%';
+  document.getElementById('bwQuotaBar').style.background = pct>80?'linear-gradient(90deg,var(--y),var(--r))':'linear-gradient(90deg,var(--g),var(--y))';
+  document.getElementById('bwQuotaLabel').textContent = used.toFixed(2)+' GB used of '+quota+' GB ('+Math.round(pct)+'%)';
+}
+function toggleBandwidth() {
+  if(bwRunning) {
+    clearInterval(bwTimer);
+    bwRunning = false;
+    document.getElementById('bwToggle').textContent = '▶ Start';
+    document.getElementById('bwStatus').style.display = 'none';
+  } else {
+    bwRunning = true;
+    document.getElementById('bwToggle').textContent = '⏹ Stop';
+    document.getElementById('bwStatus').style.display = '';
+    bwSamples = Array(BW_HISTORY).fill(0);
+    bwSessionBytes = 0;
+    bwTimer = setInterval(pollBandwidth, 1000);
+    pollBandwidth();
+  }
+}
+async function pollBandwidth() {
+  // استفاده از /api/sysinfo برای net stats
+  try {
+    const r = await fetch('/api/sysinfo');
+    const d = await r.json();
+    const rx = d.netRxBytes||0, tx = d.netTxBytes||0;
+    let rxRate = 0, txRate = 0;
+    if(bwPrevRx>0) { rxRate = Math.max(0,rx-bwPrevRx); txRate = Math.max(0,tx-bwPrevTx); }
+    bwPrevRx = rx; bwPrevTx = tx;
+    const rxMB = rxRate/1024/1024, txMB = txRate/1024/1024;
+    bwSessionBytes += rxRate + txRate;
+    bwSamples.push(rxMB);
+    if(bwSamples.length > BW_HISTORY) bwSamples.shift();
+    document.getElementById('bwRx').textContent = '↓ '+rxMB.toFixed(2)+' MB/s';
+    document.getElementById('bwTx').textContent = '↑ '+txMB.toFixed(2)+' MB/s';
+    document.getElementById('bwTotal').textContent = (bwSessionBytes/1024/1024/1024).toFixed(3)+' GB';
+    // quota accumulate
+    const prevUsed = parseFloat(localStorage.getItem('pyz_bw_used_gb')||'0');
+    localStorage.setItem('pyz_bw_used_gb', (prevUsed + (rxRate+txRate)/1024/1024/1024).toFixed(6));
+    updateBwQuotaDisplay();
+    renderBwChart();
+  } catch(e) {}
+}
+function renderBwChart() {
+  const chart = document.getElementById('bwChart');
+  if(!chart) return;
+  const max = Math.max(...bwSamples, 0.01);
+  chart.innerHTML = '';
+  bwSamples.forEach((v,i) => {
+    const h = Math.round(v/max*100);
+    const age = BW_HISTORY - i;
+    const opacity = Math.max(0.3, 1 - age/BW_HISTORY*0.7);
+    const color = v>max*0.8?'var(--r)':v>max*0.5?'var(--y)':'var(--c)';
+    const bar = document.createElement('div');
+    bar.style.cssText = `flex:1;background:${color};border-radius:2px 2px 0 0;height:${Math.max(2,h)}%;opacity:${opacity}`;
+    chart.appendChild(bar);
+  });
+}
+
+// ══════════════════════════════════════════════════════
+// ══ CANARY PROBE ══
+// ══════════════════════════════════════════════════════
+let canaryHistory = {}; // ip -> [{t, latency}]
+async function loadCanary() {
+  const list = document.getElementById('canaryList');
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const entries = d.entries||d||[];
+    if(!entries.length && !Object.keys(entries).length) {
+      list.innerHTML = '<div style="color:var(--dim);font-family:var(--font-mono);font-size:12px;padding:20px;text-align:center">هیچ IP‌ای در Monitor نیست</div>';
+      return;
+    }
+    const ips = Object.entries(entries);
+    if(!ips.length){ list.innerHTML='<div style="color:var(--dim);font-family:var(--font-mono);font-size:12px;padding:20px;text-align:center">هیچ IP‌ای در Monitor نیست</div>'; return; }
+    list.innerHTML='';
+    ips.forEach(([ip, entry]) => {
+      // نگه داشتن تاریخچه
+      if(!canaryHistory[ip]) canaryHistory[ip]=[];
+      canaryHistory[ip].push({t:Date.now(), lat: entry.latencyMs||0});
+      if(canaryHistory[ip].length>20) canaryHistory[ip].shift();
+      const hist = canaryHistory[ip];
+      // trend detection
+      let trend = 'stable', trendColor = 'var(--g)', trendText = '● Healthy';
+      if(hist.length>=3) {
+        const recent3 = hist.slice(-3).map(h=>h.lat);
+        const rising = recent3[0]<recent3[1] && recent3[1]<recent3[2];
+        const avgRecent = recent3.reduce((a,b)=>a+b,0)/3;
+        const avg = hist.reduce((a,b)=>a+b.lat,0)/hist.length;
+        if(rising && avgRecent > avg*1.3){ trend='degrading'; trendColor='var(--y)'; trendText='⚠ Degrading'; }
+        if(rising && avgRecent > avg*1.7){ trend='danger'; trendColor='var(--r)'; trendText='⛔ Danger'; }
+      }
+      // sparkline
+      const maxLat = Math.max(...hist.map(h=>h.lat), 1);
+      const sparkBars = hist.map(h => {
+        const pct = Math.round(h.lat/maxLat*100);
+        const c = h.lat<200?'var(--g)':h.lat<400?'var(--y)':'var(--r)';
+        return `<div style="flex:1;background:${c};border-radius:2px 2px 0 0;height:${Math.max(4,pct)}%;opacity:.8"></div>`;
+      }).join('');
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.cssText = `padding:14px;border-color:${trend==='degrading'?'rgba(255,215,0,.4)':trend==='danger'?'rgba(255,61,117,.4)':'var(--bd)'}`;
+      card.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div style="width:9px;height:9px;border-radius:50%;background:${trendColor}"></div>
+          <div style="font-family:var(--font-mono);font-size:13px;color:${trendColor};font-weight:700;direction:ltr">${ip}</div>
+          <div style="font-size:10px;padding:2px 8px;border-radius:12px;background:rgba(${trendColor==='var(--g)'?'0,255,170':trendColor==='var(--y)'?'255,215,0':'255,61,117'},.1);color:${trendColor};font-family:var(--font-mono)">${trendText}</div>
+          <div style="margin-right:auto;font-family:var(--font-mono);font-size:11px;color:var(--tx2)">${entry.latencyMs?Math.round(entry.latencyMs)+'ms':'—'}</div>
+          <div style="font-size:10px;color:var(--dim);font-family:var(--font-mono)">${hist.length} checks</div>
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:3px;height:28px">${sparkBars}</div>
+        ${trend!=='stable'?`<div style="margin-top:8px;font-family:var(--font-mono);font-size:10px;color:${trendColor}">${trend==='degrading'?'⚠ Latency در حال افزایش است — ممکن است به زودی down شود':'⛔ وضعیت بحرانی — سوئیچ به IP دیگر توصیه میشه'}</div>`:''}
+      `;
+      list.appendChild(card);
+    });
+  } catch(e) { list.innerHTML = '<div style="color:var(--r);font-family:var(--font-mono);font-size:11px;padding:20px">Error loading health data</div>'; }
+}
+
+// ══════════════════════════════════════════════════════
+// ══ SUBNET ORGANIZER (KANBAN) ══
+// ══════════════════════════════════════════════════════
+const SUBNET_GROUPS_KEY = 'pyz_subnet_groups_v1';
+const DEFAULT_GROUPS = [
+  { id:'cf', name:'☁ Cloudflare', color:'var(--c)', subnets:[] },
+  { id:'fastly', name:'⚡ Fastly', color:'var(--y)', subnets:[] },
+  { id:'aws', name:'🟠 AWS/CloudFront', color:'var(--o)', subnets:[] },
+  { id:'custom', name:'🗃 Custom', color:'var(--p)', subnets:[] },
+];
+function getSubnetGroups() {
+  try { return JSON.parse(localStorage.getItem(SUBNET_GROUPS_KEY)) || DEFAULT_GROUPS; } catch(e) { return DEFAULT_GROUPS; }
+}
+function saveSubnetGroups(groups) {
+  localStorage.setItem(SUBNET_GROUPS_KEY, JSON.stringify(groups));
+}
+async function loadSubnetOrg() {
+  const groups = getSubnetGroups();
+  // Merge in known subnets from /api/subnets
+  try {
+    const r = await fetch('/api/subnets');
+    const d = await r.json();
+    (d.subnets||[]).forEach(s => {
+      // اگه subnet هنوز در هیچ group نیست، به CF اضافه کن
+      const inGroup = groups.some(g => g.subnets.some(sub => sub.name===s.subnet));
+      if(!inGroup) {
+        const cfGroup = groups.find(g=>g.id==='cf');
+        if(cfGroup) cfGroup.subnets.push({ name:s.subnet, passRate:s.passRate, total:s.total });
+      }
+    });
+    saveSubnetGroups(groups);
+  } catch(e){}
+  renderSubnetKanban(groups);
+}
+function renderSubnetKanban(groups) {
+  const board = document.getElementById('subnetKanban');
+  board.innerHTML = '';
+  groups.forEach((group, gi) => {
+    const col = document.createElement('div');
+    col.style.cssText = `background:var(--bg3);border:1px solid var(--bd);border-radius:10px;padding:10px;min-height:150px`;
+    col.setAttribute('data-group-id', group.id);
+    col.innerHTML = `
+      <div style="font-size:10px;font-family:var(--font-mono);color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:9px;display:flex;align-items:center;gap:7px">
+        <span style="color:${group.color}">${group.name}</span>
+        <span style="background:var(--bg4);border:1px solid var(--bd2);padding:1px 6px;border-radius:10px;font-size:8px">${group.subnets.length}</span>
+        <button onclick="deleteSubnetGroup('${group.id}')" style="margin-right:auto;background:none;border:none;color:var(--dim);cursor:pointer;font-size:10px" title="Delete group">✕</button>
+      </div>
+      <div id="sgItems_${group.id}" style="display:flex;flex-direction:column;gap:5px;min-height:40px">
+        ${group.subnets.map((s,si)=>`
+          <div draggable="true" data-subnet="${s.name}" data-gi="${gi}" data-si="${si}"
+               ondragstart="subnetDragStart(event)" ondragover="event.preventDefault()" ondrop="subnetDrop(event,'${group.id}')"
+               style="background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:7px 10px;cursor:grab;display:flex;align-items:center;gap:7px">
+            <span style="font-family:var(--font-mono);font-size:10px;color:var(--c);flex:1;direction:ltr">${s.name}</span>
+            ${s.passRate!=null?`<span style="font-size:9px;color:${s.passRate>=50?'var(--g)':s.passRate>=25?'var(--y)':'var(--r)'};">${Math.round(s.passRate)}%</span>`:''}
+            <button onclick="removeSubnetFromGroup('${group.id}',${si})" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:9px">✕</button>
+          </div>`).join('')}
+        ${!group.subnets.length?`<div style="border:1px dashed var(--bd2);border-radius:6px;padding:10px;text-align:center;font-size:9px;color:var(--dim);font-family:var(--font-mono)" ondragover="event.preventDefault()" ondrop="subnetDrop(event,'${group.id}')">drop here</div>`:''}
+      </div>
+      <div style="margin-top:7px;display:flex;gap:5px">
+        <input placeholder="subnet/CIDR..." style="flex:1;background:var(--bg4);border:1px solid var(--bd2);color:var(--tx);padding:4px 8px;border-radius:5px;font-size:10px;font-family:var(--font-mono)" id="sgInput_${group.id}">
+        <button onclick="addSubnetToGroup('${group.id}')" style="background:var(--c);color:#000;border:none;border-radius:5px;padding:4px 9px;font-size:10px;cursor:pointer">+</button>
+      </div>
+    `;
+    board.appendChild(col);
+  });
+}
+let draggedSubnet = null, dragFromGroup = null, dragFromIndex = null;
+function subnetDragStart(e) {
+  draggedSubnet = e.target.dataset.subnet;
+  dragFromGroup = e.target.dataset.gi;
+  dragFromIndex = parseInt(e.target.dataset.si);
+}
+function subnetDrop(e, toGroupId) {
+  e.preventDefault();
+  if(!draggedSubnet) return;
+  const groups = getSubnetGroups();
+  // حذف از قبلی
+  const fromGroup = groups[parseInt(dragFromGroup)];
+  if(fromGroup) fromGroup.subnets.splice(dragFromIndex, 1);
+  // اضافه به جدید
+  const toGroup = groups.find(g=>g.id===toGroupId);
+  if(toGroup && !toGroup.subnets.some(s=>s.name===draggedSubnet)) {
+    toGroup.subnets.push({ name:draggedSubnet });
+  }
+  saveSubnetGroups(groups);
+  renderSubnetKanban(groups);
+  draggedSubnet = null;
+}
+function addSubnetToGroup(groupId) {
+  const input = document.getElementById('sgInput_'+groupId);
+  const val = input.value.trim();
+  if(!val) return;
+  const groups = getSubnetGroups();
+  const group = groups.find(g=>g.id===groupId);
+  if(group && !group.subnets.some(s=>s.name===val)) {
+    group.subnets.push({ name:val });
+    saveSubnetGroups(groups);
+    renderSubnetKanban(groups);
+  }
+  input.value='';
+}
+function removeSubnetFromGroup(groupId, idx) {
+  const groups = getSubnetGroups();
+  const group = groups.find(g=>g.id===groupId);
+  if(group){ group.subnets.splice(idx,1); saveSubnetGroups(groups); renderSubnetKanban(groups); }
+}
+function addSubnetGroup() {
+  const name = prompt('نام group جدید:');
+  if(!name) return;
+  const groups = getSubnetGroups();
+  groups.push({ id:'g_'+Date.now(), name:name, color:'var(--p)', subnets:[] });
+  saveSubnetGroups(groups);
+  renderSubnetKanban(groups);
+}
+function deleteSubnetGroup(groupId) {
+  if(!confirm('حذف این group؟')) return;
+  const groups = getSubnetGroups().filter(g=>g.id!==groupId);
+  saveSubnetGroups(groups);
+  renderSubnetKanban(groups);
+}
+
+// ══════════════════════════════════════════════════════
+// ══ SCRIPTS RUNNER ══
+// ══════════════════════════════════════════════════════
+const SCRIPT_PRESETS = {
+  daily: `// Daily best-IP finder
+scan "104.16.0.0/20" threads=300
+filter latency < 250 AND loss < 5%
+sort score desc
+take 10
+monitor add
+export "best_ips.csv"`,
+  fastly: `// Fastly-only scan
+scan "151.101.0.0/16" threads=200
+filter latency < 300
+sort latency asc
+take 5
+export "fastly.txt"`,
+  gaming: `// Gaming — lowest latency
+scan "104.16.0.0/20" threads=400
+scan "172.64.0.0/13" parallel
+filter latency < 100
+sort latency asc
+take 3
+monitor add`,
+  monitor_clean: `// Refresh monitor with fresh scan
+monitor clear
+scan "104.16.0.0/20" threads=300
+filter score > 70
+take 10
+monitor add`
+};
+function loadPreset(name) {
+  if(SCRIPT_PRESETS[name]) {
+    document.getElementById('scriptEditor').value = SCRIPT_PRESETS[name];
+    document.getElementById('scriptSavedBadge').style.display='none';
+  }
+}
+function saveScript() {
+  localStorage.setItem('pyz_script', document.getElementById('scriptEditor').value);
+  const badge = document.getElementById('scriptSavedBadge');
+  badge.style.display='';
+  setTimeout(()=>badge.style.display='none', 2000);
+}
+async function runScript() {
+  const code = document.getElementById('scriptEditor').value;
+  const out = document.getElementById('scriptOutput');
+  out.innerHTML = '<span style="color:var(--c)">⏳ Parsing script...</span>';
+  // DSL parser
+  const lines = code.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('//'));
+  let log = [];
+  for(const line of lines) {
+    const [cmd, ...args] = line.split(/\s+/);
+    const argStr = args.join(' ');
+    switch(cmd.toLowerCase()) {
+      case 'scan': {
+        const match = argStr.match(/"([^"]+)"/);
+        const subnet = match?match[1]:argStr;
+        const threadsMatch = argStr.match(/threads=(\d+)/);
+        log.push(`<span style="color:var(--c)">→ scan</span> <span style="color:var(--y)">${subnet}</span>${threadsMatch?` threads=${threadsMatch[1]}`:''}`);
+        // trigger actual scan
+        try {
+          await fetch('/api/scan/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ ranges: subnet + (threadsMatch?`\nthreads=${threadsMatch[1]}`:'') }) });
+          log.push(`<span style="color:var(--g)">✓ Scan started</span>`);
+        } catch(e) { log.push(`<span style="color:var(--r)">✗ ${e.message}</span>`); }
+        break;
+      }
+      case 'filter': log.push(`<span style="color:var(--p)">≡ filter</span> <span style="color:var(--dim)">${argStr}</span> (applies on export)`); break;
+      case 'sort': log.push(`<span style="color:var(--p)">↕ sort</span> <span style="color:var(--dim)">${argStr}</span>`); break;
+      case 'take': log.push(`<span style="color:var(--p)">◈ take</span> <span style="color:var(--y)">${argStr}</span>`); break;
+      case 'monitor': {
+        if(argStr.includes('clear')) { try { await fetch('/api/health/clear',{method:'POST'}); log.push('<span style="color:var(--g)">✓ Monitor cleared</span>'); } catch(e){} }
+        else { log.push('<span style="color:var(--dim)">♡ monitor add — runs after scan completes</span>'); }
+        break;
+      }
+      case 'export': {
+        const fn = (argStr.match(/"([^"]+)"/))||[,argStr];
+        log.push(`<span style="color:var(--g)">↓ export</span> → <span style="color:var(--c)">${fn[1]}</span>`);
+        break;
+      }
+      default: log.push(`<span style="color:var(--dim)">? unknown: ${cmd}</span>`);
+    }
+    out.innerHTML = log.join('<br>') + '<br><span class="cursor"></span>';
+  }
+  out.innerHTML = log.join('<br>') + '<br><span style="color:var(--g)">✓ Done</span>';
+}
+
+// ══════════════════════════════════════════════════════
+// ══ SHARE PAGE ══
+// ══════════════════════════════════════════════════════
+function getShareData() {
+  // از state فعلی نتایج
+  const results = window._lastResults || [];
+  const hideIP = document.getElementById('shareHideIP')?.checked;
+  const top10 = document.getElementById('shareTop10')?.checked;
+  const incScore = document.getElementById('shareIncludeScore')?.checked;
+  const incLat = document.getElementById('shareIncludeLat')?.checked;
+  const incDL = document.getElementById('shareIncludeDL')?.checked;
+  let list = results.slice(0, top10?10:results.length);
+  return list.map(r => {
+    const ip = hideIP ? r.ip.replace(/(\d+)$/, '*') : r.ip;
+    let parts = [ip];
+    if(incLat && r.latencyMs) parts.push(r.latencyMs+'ms');
+    if(incScore && r.stabilityScore) parts.push('Score:'+Math.round(r.stabilityScore));
+    if(incDL && r.downloadMbps) parts.push('↓'+r.downloadMbps.toFixed(1)+'M');
+    return parts.join(' · ');
+  });
+}
+function updateSharePreview() {
+  const lines = getShareData();
+  const el = document.getElementById('sharePreviewLines');
+  if(!el) return;
+  if(!lines.length){ el.innerHTML='<span style="color:var(--dim)">ابتدا یک scan انجام بده</span>'; return; }
+  el.innerHTML = lines.map(l=>`<div style="color:var(--g)">✓ ${l}</div>`).join('');
+}
+function shareAsText() {
+  const lines = getShareData();
+  const text = '🧅 Piyazche Results\n' + lines.map(l=>'✓ '+l).join('\n');
+  navigator.clipboard.writeText(text).then(()=>{
+    const fb = document.getElementById('shareCopyFeedback');
+    fb.style.display=''; setTimeout(()=>fb.style.display='none',2000);
+  });
+}
+function shareAsCSV() {
+  const results = window._lastResults||[];
+  const hideIP = document.getElementById('shareHideIP')?.checked;
+  const top10 = document.getElementById('shareTop10')?.checked;
+  let list = results.slice(0,top10?10:results.length);
+  const csv = 'IP,Latency(ms),Score,Download(Mbps)\n' + list.map(r=>{
+    const ip = hideIP?r.ip.replace(/(\d+)$/,'*'):r.ip;
+    return `${ip},${r.latencyMs||''},${r.stabilityScore?Math.round(r.stabilityScore):''},${r.downloadMbps?r.downloadMbps.toFixed(1):''}`;
+  }).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download = 'piyazche_results.csv';
+  a.click();
+}
+function shareAsMarkdown() {
+  const lines = getShareData();
+  const md = '## Piyazche Scan Results\n| IP | Details |\n|---|---|\n' + lines.map(l=>`| ${l.replace(' · ','` | `')} |`).join('\n');
+  navigator.clipboard.writeText(md).then(()=>{
+    const fb = document.getElementById('shareCopyFeedback');
+    fb.style.display=''; setTimeout(()=>fb.style.display='none',2000);
+  });
+}
+function shareAsLink() {
+  const lines = getShareData();
+  const encoded = btoa(unescape(encodeURIComponent(lines.join('\n'))));
+  const url = location.origin + '/?share=' + encoded;
+  navigator.clipboard.writeText(url).then(()=>{
+    const fb = document.getElementById('shareCopyFeedback');
+    fb.textContent = '✓ Link copied!';
+    fb.style.display=''; setTimeout(()=>{ fb.textContent='✓ Copied!'; fb.style.display='none'; },2000);
+  });
+}
+
+// ══════════════════════════════════════════════════════
+// ══ TLS HANDSHAKE TEST ══
+// ══════════════════════════════════════════════════════
+function loadTLSIPsFromResults() {
+  const results = window._lastResults || [];
+  const ips = results.slice(0,5).map(r=>r.ip).join(', ');
+  document.getElementById('tlsIPs').value = ips;
+}
+async function runTLSTest() {
+  const host = document.getElementById('tlsHost').value.trim() || 'speed.cloudflare.com';
+  const port = document.getElementById('tlsPort').value.trim() || '443';
+  const ipsRaw = document.getElementById('tlsIPs').value;
+  const ips = ipsRaw.split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+  if(!ips.length){ alert('حداقل یک IP وارد کن'); return; }
+  const status = document.getElementById('tlsTestStatus');
+  const resultsDiv = document.getElementById('tlsResults');
+  status.style.display=''; status.textContent='⏳ در حال تست TLS handshake برای '+ips.length+' IP...';
+  resultsDiv.style.display='none';
+  try {
+    const r = await fetch('/api/tls/test', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ips, host, port })
+    });
+    const d = await r.json();
+    status.style.display='none';
+    resultsDiv.style.display='';
+    const tbody = document.getElementById('tlsTableBody');
+    tbody.innerHTML = '';
+    (d.results||[]).forEach(item => {
+      const res = item.result;
+      const ok = res.success;
+      const totalColor = ok?(res.totalMs<200?'var(--g)':res.totalMs<500?'var(--y)':'var(--r)'):'var(--r)';
+      const expiryColor = res.certExpiry>30?'var(--g)':res.certExpiry>7?'var(--y)':'var(--r)';
+      const tr = document.createElement('tr');
+      tr.style.borderBottom='1px solid var(--bd)';
+      tr.innerHTML = `
+        <td style="padding:9px 8px;font-family:var(--font-mono);font-size:11px;color:var(--c);direction:ltr">${item.ip}</td>
+        <td style="padding:9px 8px;font-family:var(--font-mono);font-size:11px;color:var(--c)">${ok?res.tcpMs+'ms':'—'}</td>
+        <td style="padding:9px 8px;font-family:var(--font-mono);font-size:11px;color:var(--p)">${ok?res.tlsMs+'ms':'—'}</td>
+        <td style="padding:9px 8px;font-family:var(--font-mono);font-size:12px;font-weight:700;color:${totalColor}">${ok?res.totalMs+'ms':res.error||'fail'}</td>
+        <td style="padding:9px 8px;font-size:10px;color:var(--tx2)">${res.tlsVersion||'—'}</td>
+        <td style="padding:9px 8px;font-family:var(--font-mono);font-size:11px;color:${expiryColor}">${res.certExpiry!=null?res.certExpiry+'d':'—'}</td>
+        <td style="padding:9px 8px">${ok?'<span style="background:rgba(0,255,170,.1);color:var(--g);border:1px solid rgba(0,255,170,.3);padding:2px 8px;border-radius:10px;font-size:10px">✓ OK</span>':'<span style="background:rgba(255,61,117,.1);color:var(--r);border:1px solid rgba(255,61,117,.3);padding:2px 8px;border-radius:10px;font-size:10px">✗ FAIL</span>'}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch(e) {
+    status.textContent = '✗ Error: ' + e.message;
+    status.style.background='var(--rd)'; status.style.borderColor='rgba(255,61,117,.3)'; status.style.color='var(--r)';
+  }
+}
+
+// ══ hook: ذخیره results برای Share page ══
+const _origRenderResults = window.renderResults;
+if(typeof renderResults === 'function') {
+  const origFn = renderResults;
+  window.renderResults = function(results) {
+    window._lastResults = results;
+    return origFn.call(this, results);
+  };
+}
+// از WS events هم بخون
+document.addEventListener('pyz:phase2done', e => { if(e.detail) window._lastResults = e.detail; });
 </script>
 </body>
 </html>
