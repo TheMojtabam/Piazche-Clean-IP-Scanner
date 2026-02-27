@@ -80,6 +80,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/templates/delete", s.handleTemplateDelete)
 	// Subnet stats
 	mux.HandleFunc("/api/subnets", s.handleSubnets)
+	mux.HandleFunc("/api/tls/test", s.handleTLSTest)
 	// Subscription import
 	mux.HandleFunc("/api/subscription/fetch", s.handleSubscriptionFetch)
 	// Sessions persistence
@@ -1401,6 +1402,92 @@ func (s *Server) handleSubnets(w http.ResponseWriter, r *http.Request) {
 	defer s.state.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"subnets": s.state.SubnetStats})
+}
+
+// ── TLS Handshake Test ────────────────────────────────────────────────────────
+
+func (s *Server) handleTLSTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		IPs  []string `json:"ips"`
+		Host string   `json:"host"` // SNI hostname (default: speed.cloudflare.com)
+		Port string   `json:"port"` // default: 443
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IPs) == 0 {
+		jsonError(w, "ips required", 400)
+		return
+	}
+	if req.Host == "" {
+		req.Host = "speed.cloudflare.com"
+	}
+	if req.Port == "" {
+		req.Port = "443"
+	}
+
+	cfg, err := s.buildMergedConfig("")
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+
+	type ipResult struct {
+		IP     string                  `json:"ip"`
+		Result xray.TLSHandshakeResult `json:"result"`
+	}
+
+	var results []ipResult
+	for _, ip := range req.IPs {
+		socksPort := utils.AcquirePort()
+
+		cfgCopy := *cfg
+		cfgCopy.Xray.LogLevel = "none"
+
+		xrayCfg, genErr := config.GenerateXrayConfig(&cfgCopy, ip, socksPort)
+		if genErr != nil {
+			utils.ReleasePort(socksPort)
+			results = append(results, ipResult{IP: ip, Result: xray.TLSHandshakeResult{
+				Error: "config gen: " + genErr.Error(),
+			}})
+			continue
+		}
+
+		mgr := xray.NewManagerWithDebug(false)
+		if startErr := mgr.Start(xrayCfg, socksPort); startErr != nil {
+			utils.ReleasePort(socksPort)
+			results = append(results, ipResult{IP: ip, Result: xray.TLSHandshakeResult{
+				Error: "xray start: " + startErr.Error(),
+			}})
+			continue
+		}
+
+		readyCtx, readyCancel := context.WithTimeout(r.Context(), 8*time.Second)
+		waitErr := mgr.WaitForReadyWithContext(readyCtx, 7*time.Second)
+		readyCancel()
+
+		if waitErr != nil {
+			mgr.Stop()
+			utils.ReleasePort(socksPort)
+			results = append(results, ipResult{IP: ip, Result: xray.TLSHandshakeResult{
+				Error: "xray not ready",
+			}})
+			continue
+		}
+
+		tlsCtx, tlsCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		tlsRes := xray.TestTLSHandshake(tlsCtx, socksPort, req.Host, req.Port, 9*time.Second)
+		tlsCancel()
+
+		mgr.Stop()
+		utils.ReleasePort(socksPort)
+
+		results = append(results, ipResult{IP: ip, Result: tlsRes})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
 }
 
 // ── Health Monitor ────────────────────────────────────────────────────────────
