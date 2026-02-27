@@ -1,6 +1,7 @@
 package xray
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -158,7 +159,7 @@ func TestDownloadSpeed(ctx context.Context, socksPort int, downloadURL string, t
 }
 
 // TestUploadSpeed measures upload speed through the SOCKS proxy
-// Uses a timed writer to measure actual bytes-sent-per-second, not total RTT.
+// Uses bytes.NewReader for Windows compatibility (io.Pipe has issues on Windows).
 func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeout time.Duration) (bytesPerSecond float64, err error) {
 	parsedURL, err := url.Parse(uploadURL)
 	if err != nil {
@@ -176,29 +177,19 @@ func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeo
 		buf[i] = byte((i*7 + 13) & 0xFF)
 	}
 
-	// Pipe: goroutine writes to pw, HTTP reads from pr
-	pr, pw := io.Pipe()
-	writeStart := time.Now() // start timer before goroutine (conservative)
-	var bytesWritten int64
+	// bytes.NewReader is Windows-safe (no goroutine/pipe race)
+	body := bytes.NewReader(buf)
 
-	go func() {
-		n, werr := pw.Write(buf)
-		bytesWritten = int64(n)
-		pw.CloseWithError(werr)
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, pr)
+	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, body)
 	if err != nil {
-		pr.Close()
 		return 0, err
 	}
 	req.ContentLength = uploadSize
 	req.Header.Set("Content-Type", "application/octet-stream")
-	// Cloudflare __up needs this header
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", uploadSize))
 
+	start := time.Now()
 	resp, err := client.Do(req)
-	elapsed := time.Since(writeStart).Seconds()
+	elapsed := time.Since(start).Seconds()
 
 	if resp != nil {
 		io.Copy(io.Discard, resp.Body)
@@ -207,10 +198,90 @@ func TestUploadSpeed(ctx context.Context, socksPort int, uploadURL string, timeo
 	if err != nil && ctx.Err() == nil {
 		return 0, fmt.Errorf("upload request failed: %w", err)
 	}
-	if elapsed <= 0.1 || bytesWritten == 0 {
+	if elapsed <= 0.05 {
 		return 0, fmt.Errorf("upload elapsed too short: %.2fs", elapsed)
 	}
-	return float64(bytesWritten) / elapsed, nil
+	// bytes actually sent = uploadSize (bytes.NewReader sends all)
+	return float64(uploadSize) / elapsed, nil
+}
+
+// TLSHandshakeResult نتیجه‌ی تست TLS handshake
+type TLSHandshakeResult struct {
+	Success      bool          `json:"success"`
+	TotalMs      int64         `json:"totalMs"`      // کل زمان از شروع تا پایان handshake
+	TCPMs        int64         `json:"tcpMs"`        // زمان TCP connect
+	TLSMs        int64         `json:"tlsMs"`        // زمان TLS handshake
+	TLSVersion   string        `json:"tlsVersion"`   // TLS 1.2 / TLS 1.3
+	CipherSuite  string        `json:"cipherSuite"`  // نام cipher
+	ServerName   string        `json:"serverName"`
+	CertExpiry   int           `json:"certExpiry"`   // روزهای مانده به انقضاء
+	Error        string        `json:"error,omitempty"`
+}
+
+// TestTLSHandshake performs a TLS handshake timing test through the SOCKS5 proxy
+func TestTLSHandshake(ctx context.Context, socksPort int, host string, port string, timeout time.Duration) TLSHandshakeResult {
+	res := TLSHandshakeResult{ServerName: host}
+
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	if err != nil {
+		res.Error = "socks5 dialer: " + err.Error()
+		return res
+	}
+
+	target := net.JoinHostPort(host, port)
+
+	// TCP connect timing
+	tcpStart := time.Now()
+	rawConn, err := dialer.Dial("tcp", target)
+	if err != nil {
+		res.Error = "TCP connect: " + err.Error()
+		return res
+	}
+	res.TCPMs = time.Since(tcpStart).Milliseconds()
+
+	// اعمال deadline کلی
+	if dl, ok := ctx.Deadline(); ok {
+		rawConn.SetDeadline(dl)
+	}
+
+	// TLS handshake timing
+	tlsCfg := &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: false,
+	}
+	tlsConn := tls.Client(rawConn, tlsCfg)
+
+	tlsStart := time.Now()
+	if err := tlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		res.Error = "TLS handshake: " + err.Error()
+		return res
+	}
+	res.TLSMs = time.Since(tlsStart).Milliseconds()
+	res.TotalMs = res.TCPMs + res.TLSMs
+	res.Success = true
+
+	// اطلاعات TLS
+	state := tlsConn.ConnectionState()
+	switch state.Version {
+	case tls.VersionTLS13:
+		res.TLSVersion = "TLS 1.3"
+	case tls.VersionTLS12:
+		res.TLSVersion = "TLS 1.2"
+	default:
+		res.TLSVersion = fmt.Sprintf("TLS 0x%04x", state.Version)
+	}
+	res.CipherSuite = tls.CipherSuiteName(state.CipherSuite)
+
+	// تاریخ انقضاء cert
+	if len(state.PeerCertificates) > 0 {
+		cert := state.PeerCertificates[0]
+		res.CertExpiry = int(time.Until(cert.NotAfter).Hours() / 24)
+	}
+
+	tlsConn.Close()
+	return res
 }
 
 // repeatReader یه reader که یه slice داده رو یکبار میده
