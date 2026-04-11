@@ -101,6 +101,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// IP Ranges persistence
 	mux.HandleFunc("/api/ranges/save", s.handleRangesSave)
 	mux.HandleFunc("/api/ranges/load", s.handleRangesLoad)
+	// ICMP ping scan — no proxy config needed
+	mux.HandleFunc("/api/icmp/scan", s.handleICMPScan)
 }
 
 // --- API Handlers ---
@@ -2309,4 +2311,214 @@ func (s *Server) handleRangesLoad(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ranges": ranges,
 	})
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ICMP SCAN — Pure ping scan without xray/proxy
+// ══════════════════════════════════════════════════════════════════
+
+// handleICMPScan — اسکن ICMP خالص بدون نیاز به proxy config
+func (s *Server) handleICMPScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+
+	var req struct {
+		IPRanges  string `json:"ipRanges"`
+		Threads   int    `json:"threads"`
+		TimeoutMs int    `json:"timeoutMs"`
+		MaxIPs    int    `json:"maxIPs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request: "+err.Error(), 400)
+		return
+	}
+
+	s.state.mu.Lock()
+	if s.state.ScanStatus == "scanning" {
+		s.state.mu.Unlock()
+		jsonError(w, "scan already running", 409)
+		return
+	}
+	s.state.mu.Unlock()
+
+	if req.Threads <= 0 {
+		req.Threads = 200
+	}
+	if req.TimeoutMs <= 0 {
+		req.TimeoutMs = 1000
+	}
+
+	// Parse IPs
+	ips := parseIPInputWithSample(req.IPRanges, 1)
+	if req.MaxIPs > 0 && req.MaxIPs < len(ips) {
+		ips = ips[:req.MaxIPs]
+	}
+	utils.ShuffleIPs(ips)
+
+	totalCount := len(ips)
+	if totalCount == 0 {
+		jsonError(w, "no IPs found in input", 400)
+		return
+	}
+
+	go s.runICMPScan(ips, req.Threads, time.Duration(req.TimeoutMs)*time.Millisecond)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"message": "icmp scan started",
+		"total":   totalCount,
+	})
+}
+
+// runICMPScan — اجرای اسکن ICMP در background
+func (s *Server) runICMPScan(ips []string, threads int, timeout time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.state.mu.Lock()
+	s.state.cancelFn = cancel
+	s.state.ScanStatus = "scanning"
+	s.state.ScanPhase = "icmp"
+	s.state.Progress = ScanProgress{StartTime: time.Now(), Total: len(ips)}
+	s.state.Results = nil
+	s.state.Phase2Results = nil
+	s.state.mu.Unlock()
+
+	s.hub.Broadcast("status", map[string]string{"status": "scanning", "phase": "icmp"})
+	s.tuiLog(fmt.Sprintf("📡 ICMP scan started — %d IPs", len(ips)), "info")
+
+	total := len(ips)
+	startTime := time.Now()
+
+	jobs := make(chan string, threads*2)
+	resultsCh := make(chan scanner.Result, threads*4)
+
+	// Progress broadcaster goroutine
+	progDone := make(chan struct{})
+	go func() {
+		defer close(progDone)
+		ticker := time.NewTicker(400 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.state.mu.RLock()
+				d := s.state.Progress.Done
+				p := s.state.Progress.Succeeded
+				s.state.mu.RUnlock()
+				pct := 0
+				if total > 0 {
+					pct = int(float64(d) / float64(total) * 100)
+				}
+				elapsed := time.Since(startTime).Seconds()
+				rate := 0.0
+				if elapsed > 0 && d > 0 {
+					rate = float64(d) / elapsed
+				}
+				s.hub.Broadcast("progress", map[string]interface{}{
+					"done":   d,
+					"total":  total,
+					"passed": p,
+					"failed": d - p,
+					"pct":    pct,
+					"rate":   rate,
+				})
+				if d >= total {
+					return
+				}
+			}
+		}
+	}()
+
+	// Feed jobs
+	go func() {
+		for _, ip := range ips {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				return
+			case jobs <- ip:
+			}
+		}
+		close(jobs)
+	}()
+
+	// Workers
+	var wg sync.WaitGroup
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ip := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				pingResult := utils.PingWithRetries(ip, timeout, 2)
+				r := scanner.Result{
+					IP:      ip,
+					Success: pingResult.Success,
+					Latency: pingResult.Latency,
+				}
+				if pingResult.Error != nil {
+					r.Error = pingResult.Error.Error()
+				}
+				select {
+				case resultsCh <- r:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Close results channel when all workers done
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Collect results and broadcast
+	for r := range resultsCh {
+		s.state.mu.Lock()
+		s.state.Results = append(s.state.Results, r)
+		s.state.Progress.Done++
+		if r.Success {
+			s.state.Progress.Succeeded++
+		}
+		s.state.mu.Unlock()
+
+		s.hub.Broadcast("ip_result", map[string]interface{}{
+			"ip":         r.IP,
+			"success":    r.Success,
+			"latency_ms": r.Latency.Milliseconds(),
+		})
+	}
+
+	cancel() // stop progress ticker
+	<-progDone
+
+	s.state.mu.RLock()
+	passed := s.state.Progress.Succeeded
+	s.state.mu.RUnlock()
+
+	s.state.mu.Lock()
+	s.state.ScanStatus = "idle"
+	s.state.ScanPhase = ""
+	s.state.mu.Unlock()
+
+	s.hub.Broadcast("status", map[string]string{"status": "done", "phase": ""})
+	s.hub.Broadcast("scan_done", map[string]interface{}{
+		"passed":   passed,
+		"total":    total,
+		"duration": time.Since(startTime).Round(time.Second).String(),
+	})
+	s.tuiLog(fmt.Sprintf("✓ ICMP complete — %d/%d passed", passed, total), "ok")
+	go s.saveStateToDiskNow()
 }
